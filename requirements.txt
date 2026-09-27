@@ -1,0 +1,31 @@
+# =============================================================================
+# 环境依赖 (SLAI 集群 / H100)
+#
+# 注意：torch 必须与集群的 CUDA 版本匹配，建议先用 setup_env.sh 安装带 CUDA
+# 的官方 torch wheel，再执行 `pip install -r requirements.txt`。
+# =============================================================================
+
+# --- 深度学习基础 (torch 单独安装以匹配 CUDA，见 setup_env.sh) ---
+torch>=2.1
+transformers>=4.46
+accelerate>=0.26.0
+einops
+jaxtyping
+safetensors
+huggingface_hub
+datasets
+numpy
+tqdm
+jinja2
+pyyaml
+
+# --- lmtemplate 架构依赖 ---
+# `fla` 由 flash-linear-attention 提供 (ShortConvolution / GatedMLP / FusedLinearCrossEntropyLoss)
+# 注意: gka 模型用的 fla.layers.gka.GatedKalmaNet 不在官方包里, 需要 Undermyth 的 fork (fix/mesa-cg 分支):
+#   pip install -e "git+https://github.com/Undermyth/flash-linear-attention@fix/mesa-cg#egg=flash-linear-attention"
+flash-linear-attention>=0.4.1
+# 标准 softmax FlashAttention 内核 (ALL_ATTENTION_FUNCTIONS['flash_attention_2'])
+flash-attn
+
+# --- lm-eval-harness 与 LongBench 指标 (jieba/fuzzywuzzy/rouge) ---
+lm-eval[longbench]>=0.4.9
