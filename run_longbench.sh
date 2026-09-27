@@ -9,12 +9,14 @@ set -euo pipefail
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate slai_eval            # <<< 按环境名修改
 
-# export HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxx"    # <<< 下载 Llama-2 tokenizer 需要
+# 国内镜像端点：LongBench 数据集(公开)从 hf-mirror 下载，无需 HF 账号
+export HF_ENDPOINT=https://hf-mirror.com
 
 mkdir -p logs results cache
 
 python eval_longbench.py \
     --checkpoint-dir ./checkpoints \
+    --tokenizer ./tokenizer \
     --tasks longbench \
     --max-length 32768 \
     --batch-size 1 \

@@ -33,6 +33,7 @@
 │   ├── attention.py        # 模板自带的 FlashAttention 块（attn_impl="attention" 时用）
 │   └── cache_utils.py
 ├── eval_longbench.py       # 主脚本：发现 checkpoints/ 下所有 .ckpt 并逐个跑 LongBench
+├── tokenizer/              # 已下载到本地的 Llama-2 tokenizer（无需 HF 登录）
 ├── requirements.txt
 ├── setup_env.sh
 ├── run_longbench.slurm     # Slurm 作业（H100）
@@ -58,8 +59,10 @@
 ```bash
 bash setup_env.sh                 # 建 conda 环境 slai_eval 并装依赖
 conda activate slai_eval
-huggingface-cli login             # 或 export HF_TOKEN=...（只用于下载 Llama-2 tokenizer）
 ```
+
+> **不需要 HF 登录**：tokenizer 已下载到本地 `./tokenizer`；LongBench 数据集是公开的，
+> 脚本里已设置 `HF_ENDPOINT=https://hf-mirror.com` 走国内镜像下载。
 
 `flash-linear-attention`（`fla`）的版本会影响 fla 层的参数名/接口，**必须与训练 checkpoint 时使用的版本兼容**。
 如遇权重 key 对不上，先对齐 fla 版本（默认装 `>=0.4.1`，可尝试 `==0.4.2`）。
@@ -70,7 +73,7 @@ huggingface-cli login             # 或 export HF_TOKEN=...（只用于下载 Ll
 
 ### Slurm 提交（推荐）
 
-改 `run_longbench.slurm` 里的 `--partition` / `--gres` / 环境名 / `HF_TOKEN`，然后：
+改 `run_longbench.slurm` 里的 `--partition` / `--gres` / 环境名，然后：
 
 ```bash
 sbatch run_longbench.slurm
@@ -136,7 +139,7 @@ pip install -e "git+https://github.com/Undermyth/flash-linear-attention@fix/mesa
 
 ## 六、注意事项
 
-1. **401**：只有下载 `meta-llama/Llama-2-7b` tokenizer 需要 HF 登录；权重是本地 `.ckpt`，不联网。
+1. **数据集下载慢/失败**：脚本已用 `HF_ENDPOINT=https://hf-mirror.com` 走国内镜像；tokenizer 是本地 `./tokenizer`，无需 HF 登录。
 2. **权重 key 对不上**：优先怀疑 fla 版本不一致；再用 `--n-layers/--dim/...` 对齐配置。
 3. **先冒烟测试**：正式跑之前先 `--limit 5` 确认能加载、能生成。
 4. **batch-size 保持 1**：长上下文生成更稳。

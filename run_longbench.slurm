@@ -2,12 +2,12 @@
 # =============================================================================
 # Slurm 作业脚本：在 SLAI 集群上跑 LongBench 评测
 # 权重 = ./checkpoints/ 下的 4 个模型族 (gdn-muon / gka / gla / kda) 的 .ckpt
+# tokenizer = ./tokenizer (已下载到本地，无需 HF 登录)
 #
 # 提交方式:  sbatch run_longbench.slurm
-# 需要修改 (已用 <<< >>> 标注): 分区/GPU资源名、conda 环境名、HF_TOKEN
+# 需要修改 (已用 <<< >>> 标注): 分区/GPU资源名、conda 环境名
 #
-# 断点续跑: 开启了每个 checkpoint 独立的请求缓存 + --requeue。节点重启/被抢占后
-#   自动重新排队，重跑时已算过的样本直接读 cache/<checkpoint>.sqlite，只补算剩余。
+# 断点续跑: 每个 checkpoint 独立请求缓存 + --requeue。节点重启/被抢占后自动重新排队。
 #   换权重/配置/seed/任务后请先删除 cache/。
 # =============================================================================
 #SBATCH --job-name=longbench
@@ -29,16 +29,18 @@ set -euo pipefail
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate slai_eval            # <<< 按环境名修改
 
-# 2) HuggingFace 令牌 (只需要用于下载 meta-llama/Llama-2-7b tokenizer)
-# export HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxx"    # <<< 填写 token
+# 2) 国内镜像端点：LongBench 数据集(公开)会从 hf-mirror 下载，无需 HF 账号
+export HF_ENDPOINT=https://hf-mirror.com
 
 mkdir -p logs results cache
 
 # 3) 跑评测
 #    - 默认自动发现 ./checkpoints 下所有 *.ckpt 并逐个跑
-#    - 先冒烟测试可加 --limit 5；只跑某个模型族可加 --variant gla
+#    - tokenizer 用本地 ./tokenizer，不需要联网/登录
+#    - 冒烟测试加 --limit 5；只跑某个模型族加 --variant gla
 python eval_longbench.py \
     --checkpoint-dir ./checkpoints \
+    --tokenizer ./tokenizer \
     --tasks longbench \
     --max-length 32768 \
     --batch-size 1 \
