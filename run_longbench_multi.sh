@@ -41,10 +41,10 @@ fi
 echo "共 ${#CKPTS[@]} 个 checkpoint，用 ${NUM_GPUS} 张卡并行"
 
 # ---- 轮询分片到每张卡（保证每张卡任务量均衡）----
-declare -a GROUPS
+declare -a SHARDS
 for i in "${!CKPTS[@]}"; do
   gpu=$(( i % NUM_GPUS ))
-  GROUPS[$gpu]+="${CKPTS[$i]}"$'\n'
+  SHARDS[$gpu]="${SHARDS[$gpu]:-}${CKPTS[$i]}"$'\n'
 done
 
 # ---- 每张卡起一个后台进程，串行跑自己那组 ----
@@ -67,7 +67,7 @@ for ((gpu=0; gpu<NUM_GPUS; gpu++)); do
           --output-dir ./results \
           --use-cache ./cache \
           2>&1 | tee "logs/eval_gpu${gpu}_$(basename "$ckpt" .ckpt).log"
-    done <<< "${GROUPS[$gpu]}"
+    done <<< "${SHARDS[$gpu]:-}"
   ) &
   PIDS+=($!)
 done
