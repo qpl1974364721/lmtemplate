@@ -36,6 +36,48 @@ def _parse_step(stem: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+_E_SUBGROUPS = [
+    "longbench_single_e",
+    "longbench_multi_e",
+    "longbench_fewshot_e",
+    "longbench_code_e",
+    "longbench_summarization_e",
+    "longbench_synthetic_e",
+]
+
+
+def _overall_score(r: dict) -> float | None:
+    """取整体 LongBench 总分，兼容 v1 与 LongBench-E。
+
+    - v1: 直接用 longbench 组 score;
+    - LongBench-E: 完整 13 任务 = 6 个子组的平均;
+    - 退回: 只有 longbench_e 主组(9 任务)时用它。
+    """
+    groups = r.get("groups", {}) or {}
+    results = r.get("results", {}) or {}
+
+    score = _pick_score(groups.get("longbench", {}))
+    if score is None:
+        score = _pick_score(results.get("longbench", {}))
+    if score is not None:
+        return score
+
+    sub = []
+    for name in _E_SUBGROUPS:
+        s = _pick_score(groups.get(name, {}))
+        if s is None:
+            s = _pick_score(results.get(name, {}))
+        if s is not None:
+            sub.append(s)
+    if sub:
+        return sum(sub) / len(sub)
+
+    score = _pick_score(groups.get("longbench_e", {}))
+    if score is None:
+        score = _pick_score(results.get("longbench_e", {}))
+    return score
+
+
 def collect(results_dir: Path) -> list[dict]:
     rows = []
     for rj in sorted(results_dir.glob("*/*/results.json")):
@@ -43,10 +85,7 @@ def collect(results_dir: Path) -> list[dict]:
             r = json.loads(rj.read_text(encoding="utf-8"))
         except Exception:
             continue
-        # 优先从 groups 取，其次从 results 里取
-        score = _pick_score((r.get("groups", {}) or {}).get("longbench", {}))
-        if score is None:
-            score = _pick_score((r.get("results", {}) or {}).get("longbench", {}))
+        score = _overall_score(r)
         stem = rj.parent.name             # checkpoint 名
         variant = rj.parent.parent.name   # 模型族目录名
         rows.append({
@@ -71,7 +110,7 @@ def main() -> None:
         return
 
     variants = sorted({r["variant"] for r in rows})
-    print("\n========== LongBench 总分（0-100，score×100）==========")
+    print("\n========== LongBench(-E) 总分（0-100，score×100）==========")
     for v in variants:
         vrows = sorted([r for r in rows if r["variant"] == v],
                        key=lambda r: (r["bt"] is None, r["bt"] or 0))

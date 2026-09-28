@@ -34,7 +34,7 @@ python eval_longbench.py \
     --checkpoint-dir ./checkpoints \
     --filter 20bt \
     --tokenizer ./tokenizer \
-    --tasks longbench \
+    --tasks longbench_e,longbench_summarization_e,longbench_synthetic_e \
     --max-length 65536 \
     --batch-size 1 \
     --device cuda:0 \

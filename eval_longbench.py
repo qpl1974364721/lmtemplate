@@ -351,8 +351,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hf-token", type=str, default=None,
                    help="HuggingFace token for the gated Llama-2 tokenizer. Defaults to $HF_TOKEN.")
 
-    p.add_argument("--tasks", type=str, default="longbench",
-                   help="lm-eval task/group names (default: longbench = all 21 tasks).")
+    p.add_argument("--tasks", type=str, default="longbench_e,longbench_summarization_e,longbench_synthetic_e",
+                   help="lm-eval task/group names (默认：完整 LongBench-E 13 任务 = "
+                        "longbench_e + summarization_e + synthetic_e)。v1 用 longbench。")
     p.add_argument("--max-length", type=int, default=65536)
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--limit", type=float, default=None,
