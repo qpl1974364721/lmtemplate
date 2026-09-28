@@ -25,8 +25,23 @@
 set -euo pipefail
 
 # 1) conda 环境
+# 定位并加载 conda（非登录 shell 里 conda 不在 PATH）
+find_conda() {
+  local c
+  for c in "${CONDA_EXE:-}" \
+           "/home/qpl/miniconda3/bin/conda" "/home/qpl/anaconda3/bin/conda" \
+           "$HOME/miniconda3/bin/conda" "$HOME/anaconda3/bin/conda" \
+           "/opt/conda/bin/conda" "/opt/miniconda3/bin/conda" "/opt/anaconda3/bin/conda" \
+           "/usr/local/miniconda3/bin/conda" "/usr/local/anaconda3/bin/conda" \
+           "/home/miniconda3/bin/conda" "/home/anaconda3/bin/conda"; do
+    if [ -n "$c" ] && [ -x "$c" ]; then echo "$c"; return 0; fi
+  done
+  return 1
+}
+CONDA_BIN="$(find_conda)" || { echo "找不到 conda"; exit 1; }
+CONDA_BASE="$(cd "$(dirname "$CONDA_BIN")/.." && pwd)"
 # shellcheck source=/dev/null
-source "$(conda info --base)/etc/profile.d/conda.sh"
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate slai_eval            # <<< 按环境名修改
 
 # 2) 国内镜像端点：LongBench 数据集(公开)会从 hf-mirror 下载，无需 HF 账号
