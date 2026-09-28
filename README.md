@@ -38,7 +38,8 @@
 ├── requirements.txt
 ├── setup_env.sh
 ├── run_longbench.slurm     # Slurm 作业（H100）
-├── run_longbench.sh        # 交互式直接运行
+├── run_longbench.sh        # 交互式单卡直接运行
+├── run_longbench_multi.sh  # 多卡分片并行运行（NUM_GPUS=N）
 └── README.md
 ```
 
@@ -85,6 +86,19 @@ sbatch run_longbench.slurm
 ```bash
 bash run_longbench.sh
 ```
+
+### 多卡并行（推荐，提速）
+
+```bash
+# 先看实例有几张卡
+nvidia-smi -L
+
+# 有几张设几（默认 4）：
+NUM_GPUS=8 bash run_longbench_multi.sh
+```
+
+它会把 `checkpoints/` 下所有 `.ckpt` 平分到 N 张卡上并行跑，每张卡仍 `batch_size=1`。跑完自动调
+`make_results_table.py` 生成汇总表。
 
 ### 直接用 `eval_longbench.py`
 

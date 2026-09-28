@@ -160,7 +160,7 @@ def load_state_dict_flexible(model: ModelForCausalLM, loaded: dict[str, torch.Te
 # Checkpoint discovery
 # --------------------------------------------------------------------------- #
 def discover_checkpoints(checkpoint_dir: str, variant: str | None,
-                         single: str | None) -> list[tuple[str, Path]]:
+                         single: str | None, pattern: str | None = None) -> list[tuple[str, Path]]:
     """Return ``[(attn_impl, ckpt_path), ...]`` in deterministic order."""
     if single:
         ckpt = Path(single)
@@ -185,6 +185,9 @@ def discover_checkpoints(checkpoint_dir: str, variant: str | None,
             continue
         ckpts = sorted(list(d.glob("*.ckpt")) + list(d.glob("*.pt")))
         items.extend((attn, c) for c in ckpts)
+
+    if pattern:
+        items = [(a, c) for (a, c) in items if pattern in c.stem]
 
     if not items:
         raise FileNotFoundError(
@@ -329,6 +332,8 @@ def parse_args() -> argparse.Namespace:
                    help="Run a single .ckpt file instead of auto-discovery (use with --variant).")
     p.add_argument("--variant", type=str, default=None,
                    help="Only run this variant (dir name or attn_impl: gdn-muon/gdn/gla/kda/gka).")
+    p.add_argument("--filter", type=str, default=None,
+                   help="Only run checkpoints whose filename contains this substring (e.g. '20bt').")
 
     p.add_argument("--config", type=str, default=None,
                    help="Optional path to a config.json (usually not needed for Lightning ckpts).")
@@ -348,7 +353,7 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--tasks", type=str, default="longbench",
                    help="lm-eval task/group names (default: longbench = all 21 tasks).")
-    p.add_argument("--max-length", type=int, default=32768)
+    p.add_argument("--max-length", type=int, default=65536)
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--limit", type=float, default=None,
                    help="Run only N samples per task (or a fraction <1) — smoke test only.")
@@ -389,7 +394,7 @@ def main() -> None:
     )
     log.info("Tokenizer: %s (vocab %d)", tokenizer.name_or_path, tokenizer.vocab_size)
 
-    checkpoints = discover_checkpoints(args.checkpoint_dir, args.variant, args.checkpoint)
+    checkpoints = discover_checkpoints(args.checkpoint_dir, args.variant, args.checkpoint, args.filter)
     log.info("Found %d checkpoint(s) to evaluate.", len(checkpoints))
 
     summaries = []

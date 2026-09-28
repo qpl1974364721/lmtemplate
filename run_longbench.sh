@@ -32,9 +32,10 @@ mkdir -p logs results cache
 
 python eval_longbench.py \
     --checkpoint-dir ./checkpoints \
+    --filter 20bt \
     --tokenizer ./tokenizer \
     --tasks longbench \
-    --max-length 32768 \
+    --max-length 65536 \
     --batch-size 1 \
     --device cuda:0 \
     --output-dir ./results \

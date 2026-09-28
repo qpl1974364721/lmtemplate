@@ -33,7 +33,7 @@ export HF_HOME=/home/qpl/.cache/huggingface
 mkdir -p logs results cache
 
 # ---- 收集所有 checkpoint ----
-mapfile -t CKPTS < <(find checkpoints -name "*.ckpt" -type f | sort)
+mapfile -t CKPTS < <(find checkpoints -name "*20bt*.ckpt" -type f | sort)
 if [ "${#CKPTS[@]}" -eq 0 ]; then
   echo "checkpoints/ 下没有 .ckpt"
   exit 1
@@ -61,7 +61,7 @@ for ((gpu=0; gpu<NUM_GPUS; gpu++)); do
           --variant "$variant" \
           --tokenizer ./tokenizer \
           --tasks longbench \
-          --max-length 32768 \
+          --max-length 65536 \
           --batch-size 1 \
           --device cuda:0 \
           --output-dir ./results \
