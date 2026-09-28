@@ -33,6 +33,7 @@
 │   ├── attention.py        # 模板自带的 FlashAttention 块（attn_impl="attention" 时用）
 │   └── cache_utils.py
 ├── eval_longbench.py       # 主脚本：发现 checkpoints/ 下所有 .ckpt 并逐个跑 LongBench
+├── make_results_table.py   # 汇总脚本：把各 checkpoint 的 LongBench 总分汇成对比表/CSV
 ├── tokenizer/              # 已下载到本地的 Llama-2 tokenizer（无需 HF 登录）
 ├── requirements.txt
 ├── setup_env.sh
@@ -114,7 +115,28 @@ python eval_longbench.py --limit 5
 
 ---
 
-## 四、断点续跑
+## 四、结果解读
+
+每个 checkpoint 的完整结果在 `results/<族>/<checkpoint>/results.json`，汇总在 `results/summary.json`。
+
+- 每个任务一行，`score` 是该任务主指标（F1 / ROUGE / 检索准确率 / 代码相似度等）；
+- `longbench` 组的总分是 21 个子任务分数的**平均**。
+
+**注意刻度**：lm-eval 里这些 `score` 是 **0–1 小数**，官方 LongBench / 论文里通常是 **×100 的 0–100 整数**。
+即 `score=0.45` 等价于官方口径的 `45`；引用或画图时记得 ×100。
+
+跑完后用汇总脚本把所有 checkpoint 的总分汇成对比表：
+
+```bash
+python make_results_table.py
+```
+
+它会读 `results/*/*/results.json`，按「模型族 × 训练 token 数」列出每个 checkpoint 的 `longbench` 总分（已 ×100），
+并生成 `results/longbench_table.csv`，方便画 gdn/gka/gla/kda 随训练步数变化的曲线。
+
+---
+
+## 五、断点续跑
 
 每个 checkpoint 用独立的请求缓存（默认 `results/cache/<checkpoint>.sqlite`，lm-eval 会加 `_rank0.db` 后缀）。
 `run_longbench.slurm` 里已加 `#SBATCH --requeue`，节点重启/被抢占后自动重新排队，重跑自动续算。
@@ -123,7 +145,7 @@ python eval_longbench.py --limit 5
 
 ---
 
-## 五、`gka`（Gated KalmaNet）的 fla 依赖
+## 六、`gka`（Gated KalmaNet）的 fla 依赖
 
 `gka` 用的是 `fla.layers.gka.GatedKalmaNet`，这个层**不在官方 `flash-linear-attention` 里**，
 而在 Undermyth 的 fork 的 `fix/mesa-cg` 分支：
@@ -137,9 +159,11 @@ pip install -e "git+https://github.com/Undermyth/flash-linear-attention@fix/mesa
 
 ---
 
-## 六、注意事项
+## 七、注意事项
 
 1. **数据集下载慢/失败**：脚本已用 `HF_ENDPOINT=https://hf-mirror.com` 走国内镜像；tokenizer 是本地 `./tokenizer`，无需 HF 登录。
 2. **权重 key 对不上**：优先怀疑 fla 版本不一致；再用 `--n-layers/--dim/...` 对齐配置。
 3. **先冒烟测试**：正式跑之前先 `--limit 5` 确认能加载、能生成。
 4. **batch-size 保持 1**：长上下文生成更稳。
+
+

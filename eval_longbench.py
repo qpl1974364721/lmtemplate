@@ -216,6 +216,18 @@ def load_tokenizer(tokenizer_name: str, hf_token: str | None):
 # --------------------------------------------------------------------------- #
 # One checkpoint
 # --------------------------------------------------------------------------- #
+def _pick_score(metrics):
+    """Return the 'score' value from a lm-eval metric dict, tolerating both
+    'score' and 'score,<filter>' key styles."""
+    if not isinstance(metrics, dict):
+        return None
+    for key, val in metrics.items():
+        if key == "score" or key.startswith("score,"):
+            if isinstance(val, (int, float)):
+                return val
+    return None
+
+
 def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
                        config_overrides: dict) -> None:
     ckpt_name = ckpt_path.stem
@@ -300,9 +312,8 @@ def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
         "checkpoint": str(ckpt_path),
         "variant": ckpt_path.parent.name,
         "attn_impl": attn_impl,
-        "longbench_score": groups.get("longbench", {}).get("score") if groups else None,
-        "per_task": {k: (v.get("score") if isinstance(v, dict) else v)
-                     for k, v in task_results.items()},
+        "longbench_score": _pick_score(groups.get("longbench", {})),
+        "per_task": {k: _pick_score(v) for k, v in task_results.items()},
     }
     return summary
 
