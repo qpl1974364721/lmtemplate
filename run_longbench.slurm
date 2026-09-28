@@ -31,6 +31,7 @@ conda activate slai_eval            # <<< 按环境名修改
 
 # 2) 国内镜像端点：LongBench 数据集(公开)会从 hf-mirror 下载，无需 HF 账号
 export HF_ENDPOINT=https://hf-mirror.com
+export HF_HOME=/home/qpl/.cache/huggingface   # 数据集缓存放到持久目录，容器重启不丢
 
 mkdir -p logs results cache
 
