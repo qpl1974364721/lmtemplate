@@ -330,8 +330,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rotary-base", type=int, default=None)
     p.add_argument("--key-expand", type=int, default=None)
 
-    p.add_argument("--tokenizer", type=str, default="meta-llama/Llama-2-7b",
-                   help="Tokenizer name or local path (default: meta-llama/Llama-2-7b).")
+    p.add_argument("--tokenizer", type=str, default="./tokenizer",
+                   help="Tokenizer name or local path (default: ./tokenizer, the bundled Llama tokenizer).")
     p.add_argument("--hf-token", type=str, default=None,
                    help="HuggingFace token for the gated Llama-2 tokenizer. Defaults to $HF_TOKEN.")
 
