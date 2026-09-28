@@ -34,6 +34,59 @@ sys.path.insert(0, str(HERE))
 
 from module.modeling import ModelConfig, ModelForCausalLM  # noqa: E402
 
+from lm_eval.models.huggingface import HFLM  # noqa: E402
+
+
+class MiddleTruncHFLM(HFLM):
+    """HFLM 变体：对超长输入做 LongBench 官方「中间截断」，替代 lm-eval 默认的左截断。
+
+    官方 pred.py 的做法是 tokenize 后只保留前一半 + 后一半、丢掉中间
+    （“truncate in the middle, since the left and right side may contain crucial
+    instructions”，与 Lost in the Middle 的观察一致）。这里重写 tok_batch_encode，
+    在逐条 tokenize 后做同样的中间截断，再左 padding。
+    """
+
+    def tok_batch_encode(self, strings, padding_side="left", left_truncate_len=None, truncation=False):
+        old_padding_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = padding_side
+
+        # 与父类相同的 BOS 处理逻辑
+        bos = getattr(self.tokenizer, "bos_token", None)
+        if self.backend == "causal":
+            if bos is not None and strings[0].startswith(bos):
+                add_special_tokens = {"add_special_tokens": False}
+            elif self.add_bos_token is not None:
+                add_special_tokens = {"add_special_tokens": self.add_bos_token}
+            else:
+                add_special_tokens = {}
+        else:
+            add_special_tokens = {}
+
+        # 逐条 tokenize（不做截断）
+        encodings = [self.tokenizer.encode(s, **add_special_tokens) for s in strings]
+
+        # 中间截断：保留前一半 + 后一半（丢掉中间）
+        if left_truncate_len:
+            for i, enc in enumerate(encodings):
+                if len(enc) > left_truncate_len:
+                    half = left_truncate_len // 2
+                    encodings[i] = enc[:half] + enc[-half:]
+
+        # 左 padding 到最长
+        max_len = max(len(e) for e in encodings)
+        pad_id = self.tokenizer.pad_token_id
+        input_ids = []
+        attn_masks = []
+        for e in encodings:
+            n = len(e)
+            input_ids.append([pad_id] * (max_len - n) + e)
+            attn_masks.append([0] * (max_len - n) + [1] * n)
+
+        self.tokenizer.padding_side = old_padding_side
+        return torch.tensor(input_ids), torch.tensor(attn_masks)
+
+
+
 log = logging.getLogger("longbench_eval")
 
 # --------------------------------------------------------------------------- #
@@ -257,9 +310,7 @@ def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
     model.eval()
     model.device = torch.device(args.device)
 
-    from lm_eval.models.huggingface import HFLM
-
-    lm = HFLM(
+    lm = MiddleTruncHFLM(
         pretrained=model,
         tokenizer=tokenizer,
         backend="causal",
