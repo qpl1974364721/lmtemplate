@@ -317,88 +317,30 @@ class ModelForCausalLM(nn.Module):
         eos_token_id: int = 2,
         **kwargs
     ):
-        # Determine stopping condition
-        if max_new_tokens is None and max_length is None:
-            max_new_tokens = 100
+        # batch_size=1、无 padding，mask 全 1 无用；置 None 让 fla 层跳过 mask 处理，
+        # 避免 fla simple_gla 里 v.mul_ 对 conv 输出 view 做 inplace 的报错。
+        attention_mask = None
 
-        if max_new_tokens is not None:
-            target_length = input_ids.shape[1] + max_new_tokens
-        else:
-            target_length = max_length
-            max_new_tokens = max_length - input_ids.shape[1]
+        # 推理阶段关闭 autograd，避免 64k 上下文下保留全部中间激活导致显存暴涨
+        with torch.no_grad():
+            # Determine stopping condition
+            if max_new_tokens is None and max_length is None:
+                max_new_tokens = 100
 
-        batch_size, seq_len = input_ids.shape
-        device = input_ids.device
-
-        # Prefill phase
-        position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1).to(device)
-        outputs = self.model(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            attention_mask=attention_mask,
-            use_cache=use_cache,
-            past_key_values=past_key_values
-        )
-        hidden_states = outputs[0]
-        past_key_values = outputs[1]
-
-        # Get logits for next token prediction
-        logits = self.lm_head(hidden_states)
-        next_token_logits = logits[:, -1, :]
-
-        # Initialize generated sequence
-        generated = input_ids
-
-        # Decode loop
-        while past_key_values.get_sequence_length() < target_length:
-            # Apply sampling logic
-            if do_sample:
-                # Temperature
-                if temperature != 1.0:
-                    next_token_logits = next_token_logits / temperature
-
-                # Top-k
-                if top_k > 0:
-                    kth_vals = torch.kthvalue(next_token_logits, logits.size(-1) - top_k + 1, dim=-1).values
-                    next_token_logits = torch.where(next_token_logits < kth_vals.unsqueeze(-1), torch.full_like(next_token_logits, float('-inf')), next_token_logits)
-
-                # Top-p (nucleus)
-                if top_p < 1.0:
-                    sorted_logits, indices = torch.sort(next_token_logits, descending=True)
-                    probs = torch.softmax(sorted_logits, dim=-1)
-                    cumsum = torch.cumsum(probs, dim=-1)
-                    mask = cumsum > top_p
-                    mask[:, 1:] = mask[:, :-1].clone()
-                    mask[:, 0] = False
-                    sorted_logits = sorted_logits.masked_fill(mask, float('-inf'))
-                    next_token_logits = torch.gather(sorted_logits, dim=-1, index=indices)
-
-                # Sample
-                probs = torch.softmax(next_token_logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
+            if max_new_tokens is not None:
+                target_length = input_ids.shape[1] + max_new_tokens
             else:
-                # Greedy decoding
-                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                target_length = max_length
+                max_new_tokens = max_length - input_ids.shape[1]
 
-            # Append to sequence
-            generated = torch.cat([generated, next_token], dim=-1)
+            batch_size, seq_len = input_ids.shape
+            device = input_ids.device
 
-            # Check EOS
-            if (next_token == eos_token_id).all():
-                break
-
-            # Prepare for next iteration
-            next_token_id = next_token
-            next_position_ids = torch.tensor([past_key_values.get_sequence_length()]).unsqueeze(0).expand(batch_size, -1).to(device)
-
-            # Extend attention mask (all ones since no padding in generation)
-            if attention_mask is not None:
-                attention_mask = torch.cat([attention_mask, torch.ones(batch_size, 1, device=device, dtype=attention_mask.dtype)], dim=-1)
-
-            # Forward pass with cached states
+            # Prefill phase
+            position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1).to(device)
             outputs = self.model(
-                input_ids=next_token_id,
-                position_ids=next_position_ids,
+                input_ids=input_ids,
+                position_ids=position_ids,
                 attention_mask=attention_mask,
                 use_cache=use_cache,
                 past_key_values=past_key_values
@@ -406,8 +348,72 @@ class ModelForCausalLM(nn.Module):
             hidden_states = outputs[0]
             past_key_values = outputs[1]
 
-            # Get logits
+            # Get logits for next token prediction
             logits = self.lm_head(hidden_states)
             next_token_logits = logits[:, -1, :]
 
-        return generated
+            # Initialize generated sequence
+            generated = input_ids
+
+            # Decode loop
+            while past_key_values.get_sequence_length() < target_length:
+                # Apply sampling logic
+                if do_sample:
+                    # Temperature
+                    if temperature != 1.0:
+                        next_token_logits = next_token_logits / temperature
+
+                    # Top-k
+                    if top_k > 0:
+                        kth_vals = torch.kthvalue(next_token_logits, logits.size(-1) - top_k + 1, dim=-1).values
+                        next_token_logits = torch.where(next_token_logits < kth_vals.unsqueeze(-1), torch.full_like(next_token_logits, float('-inf')), next_token_logits)
+
+                    # Top-p (nucleus)
+                    if top_p < 1.0:
+                        sorted_logits, indices = torch.sort(next_token_logits, descending=True)
+                        probs = torch.softmax(sorted_logits, dim=-1)
+                        cumsum = torch.cumsum(probs, dim=-1)
+                        mask = cumsum > top_p
+                        mask[:, 1:] = mask[:, :-1].clone()
+                        mask[:, 0] = False
+                        sorted_logits = sorted_logits.masked_fill(mask, float('-inf'))
+                        next_token_logits = torch.gather(sorted_logits, dim=-1, index=indices)
+
+                    # Sample
+                    probs = torch.softmax(next_token_logits, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1)
+                else:
+                    # Greedy decoding
+                    next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+                # Append to sequence
+                generated = torch.cat([generated, next_token], dim=-1)
+
+                # Check EOS
+                if (next_token == eos_token_id).all():
+                    break
+
+                # Prepare for next iteration
+                next_token_id = next_token
+                next_position_ids = torch.tensor([past_key_values.get_sequence_length()]).unsqueeze(0).expand(batch_size, -1).to(device)
+
+                # Extend attention mask (all ones since no padding in generation)
+                if attention_mask is not None:
+                    attention_mask = torch.cat([attention_mask, torch.ones(batch_size, 1, device=device, dtype=attention_mask.dtype)], dim=-1)
+
+                # Forward pass with cached states
+                outputs = self.model(
+                    input_ids=next_token_id,
+                    position_ids=next_position_ids,
+                    attention_mask=attention_mask,
+                    use_cache=use_cache,
+                    past_key_values=past_key_values
+                )
+                hidden_states = outputs[0]
+                past_key_values = outputs[1]
+
+                # Get logits
+                logits = self.lm_head(hidden_states)
+                next_token_logits = logits[:, -1, :]
+
+            return generated
