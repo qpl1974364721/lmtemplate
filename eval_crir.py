@@ -273,8 +273,10 @@ def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
     )
 
     import lm_eval
+    from lm_eval.tasks import TaskManager
 
     tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
+    task_manager = TaskManager(include_path=str(HERE / "tasks"))
 
     # Per-checkpoint request cache -> resume after a restart. The cache is keyed
     # only by prompt + gen_kwargs, so it MUST be separated per checkpoint.
@@ -294,7 +296,7 @@ def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
         limit=args.limit,
         use_cache=use_cache,
         cache_requests=args.cache_requests,
-        include_path=str(HERE / "tasks"),
+        task_manager=task_manager,
         log_samples=False,
         apply_chat_template=False,
         confirm_run_unsafe_code=True,
