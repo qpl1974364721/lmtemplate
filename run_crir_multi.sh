@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 多卡分片运行 LongBench：把 checkpoints/ 下所有 .ckpt 平分到 N 张卡并行跑
-# 用法:  NUM_GPUS=4 bash run_longbench_multi.sh   (默认 4 张卡)
+# 多卡分片运行 CRIR：把 gla / gdn-muon / kda 的 20bt checkpoint 平分到 N 张卡并行跑
+# 用法:  NUM_GPUS=3 bash run_crir_multi.sh   (默认 3 张卡)
 # =============================================================================
 set -euo pipefail
 
-NUM_GPUS="${NUM_GPUS:-4}"
+NUM_GPUS="${NUM_GPUS:-3}"
 ENV_NAME="${ENV_NAME:-slai_eval}"
 
 # ---- 定位并加载 conda（非登录 shell 里 conda 不在 PATH）----
@@ -32,8 +32,8 @@ export HF_HOME=/home/qpl/.cache/huggingface
 
 mkdir -p logs results cache
 
-# ---- 收集所有 checkpoint ----
-mapfile -t CKPTS < <(find checkpoints -name "*20bt*.ckpt" -type f | sort)
+# ---- 只收集 gla / gdn-muon / kda 的 20bt checkpoint（排除 gka）----
+mapfile -t CKPTS < <(find checkpoints/gla checkpoints/gdn-muon checkpoints/kda -name "*20bt*.ckpt" -type f | sort)
 if [ "${#CKPTS[@]}" -eq 0 ]; then
   echo "checkpoints/ 下没有 .ckpt"
   exit 1
@@ -56,12 +56,11 @@ for ((gpu=0; gpu<NUM_GPUS; gpu++)); do
       [ -z "$ckpt" ] && continue
       variant="$(basename "$(dirname "$ckpt")")"
       echo "[GPU$gpu] $(date '+%F %T') 开始 $ckpt"
-      python eval_longbench.py \
+      python eval_crir.py \
           --checkpoint "$ckpt" \
           --variant "$variant" \
           --tokenizer ./tokenizer \
-          --tasks longbench_e,longbench_summarization_e,longbench_synthetic_e \
-          --max-length 65536 \
+          --max-length 2048 \
           --batch-size 1 \
           --device cuda:0 \
           --output-dir ./results \
@@ -78,4 +77,4 @@ for pid in "${PIDS[@]}"; do
 done
 
 echo "全部完成，生成汇总表 ..."
-python make_results_table.py
+python make_crir_table.py

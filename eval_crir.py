@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
-"""Run LongBench (lm-eval-harness) for the lmtemplate models stored as Lightning
-checkpoints under ``checkpoints/``.
+"""Run the CRIR benchmark for the lmtemplate checkpoints.
 
-The server layout is::
+CRIR = the two evaluation groups from "Preconditioned DeltaNet: Curvature-aware
+Sequence Modeling for Linear Recurrences" (arXiv:2604.21100, Table 4):
+
+  * Commonsense Reasoning (9): LAMBADA, WikiText, ARC-easy, ARC-challenge,
+    HellaSwag, PIQA, WinoGrande, BoolQ, SciQ
+  * In-context Retrieval (5): FDA, SWDE, SQuAD, TriviaQA, DROP
+
+Everything is evaluated with lm-evaluation-harness in a zero-shot setting. The
+five ICR tasks are vendored under ``tasks/`` (see ``tasks/icr_tasks.py``) because
+the harness does not ship the cloze TriviaQA / DROP tasks.
+
+The script discovers ``*20bt*.ckpt`` checkpoints (excluding gka), loads each one,
+wraps the model with lm-eval's ``HFLM`` and evaluates the CRIR task list. Results
+are cached per checkpoint so a restart resumes without re-running finished
+requests.
+
+Server layout::
 
     lmtemplate/
-      module/                 # this repo's architecture code
+      module/                 # architecture code
+      tasks/                  # vendored ICR task configs
       checkpoints/
-        gdn-muon/gdn-0.4b-muon-*.ckpt   -> Gated DeltaNet     (attn_impl="gdn")
+        gdn-muon/gdn-0.4b-muon-*.ckpt   -> Gated DeltaNet       (attn_impl="gdn")
         gla/    gla-0.4b-muon-*.ckpt     -> Gated Linear Attention (attn_impl="gla")
-        kda/    kda-0.4b-muon-*.ckpt     -> Kalman Delta Attention (attn_impl="kda")
-        gka/    gka-*.ckpt               -> Gated KalmaNet   (attn_impl="gka")
-
-Each ``.ckpt`` is a Lightning checkpoint (state_dict keys prefixed with ``model.``).
-The script discovers every checkpoint, instantiates the matching architecture,
-wraps it with lm-eval's ``HFLM`` and evaluates it on the ``longbench`` group.
+        kda/    kda-0.4b-muon-*.ckpt     -> Kimi Delta Attention (attn_impl="kda")
+        gka/    gka-*.ckpt               -> Gated KalmaNet      (attn_impl="gka", excluded)
 """
 
 from __future__ import annotations
@@ -33,66 +45,14 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from module.modeling import ModelConfig, ModelForCausalLM  # noqa: E402
-
 from lm_eval.models.huggingface import HFLM  # noqa: E402
+from crir_bench import TASK_NAMES, compute_scores  # noqa: E402
 
-
-class MiddleTruncHFLM(HFLM):
-    """HFLM 变体：对超长输入做 LongBench 官方「中间截断」，替代 lm-eval 默认的左截断。
-
-    官方 pred.py 的做法是 tokenize 后只保留前一半 + 后一半、丢掉中间
-    （“truncate in the middle, since the left and right side may contain crucial
-    instructions”，与 Lost in the Middle 的观察一致）。这里重写 tok_batch_encode，
-    在逐条 tokenize 后做同样的中间截断，再左 padding。
-    """
-
-    def tok_batch_encode(self, strings, padding_side="left", left_truncate_len=None, truncation=False):
-        old_padding_side = self.tokenizer.padding_side
-        self.tokenizer.padding_side = padding_side
-
-        # 与父类相同的 BOS 处理逻辑
-        bos = getattr(self.tokenizer, "bos_token", None)
-        if self.backend == "causal":
-            if bos is not None and strings[0].startswith(bos):
-                add_special_tokens = {"add_special_tokens": False}
-            elif self.add_bos_token is not None:
-                add_special_tokens = {"add_special_tokens": self.add_bos_token}
-            else:
-                add_special_tokens = {}
-        else:
-            add_special_tokens = {}
-
-        # 逐条 tokenize（不做截断）
-        encodings = [self.tokenizer.encode(s, **add_special_tokens) for s in strings]
-
-        # 中间截断：保留前一半 + 后一半（丢掉中间）
-        if left_truncate_len:
-            for i, enc in enumerate(encodings):
-                if len(enc) > left_truncate_len:
-                    half = left_truncate_len // 2
-                    encodings[i] = enc[:half] + enc[-half:]
-
-        # 左 padding 到最长
-        max_len = max(len(e) for e in encodings)
-        pad_id = self.tokenizer.pad_token_id
-        input_ids = []
-        attn_masks = []
-        for e in encodings:
-            n = len(e)
-            input_ids.append([pad_id] * (max_len - n) + e)
-            attn_masks.append([0] * (max_len - n) + [1] * n)
-
-        self.tokenizer.padding_side = old_padding_side
-        return torch.tensor(input_ids), torch.tensor(attn_masks)
-
-
-
-log = logging.getLogger("longbench_eval")
+log = logging.getLogger("crir_eval")
 
 # --------------------------------------------------------------------------- #
 # Variant -> attention core mapping
 # --------------------------------------------------------------------------- #
-# Directory name (or an explicit `--variant` value) -> ModelConfig.attn_impl.
 VARIANT_ATTN = {
     "gdn-muon": "gdn",
     "gdn": "gdn",
@@ -213,8 +173,10 @@ def load_state_dict_flexible(model: ModelForCausalLM, loaded: dict[str, torch.Te
 # Checkpoint discovery
 # --------------------------------------------------------------------------- #
 def discover_checkpoints(checkpoint_dir: str, variant: str | None,
-                         single: str | None, pattern: str | None = None) -> list[tuple[str, Path]]:
+                         single: str | None, pattern: str | None = None,
+                         exclude: set[str] | None = None) -> list[tuple[str, Path]]:
     """Return ``[(attn_impl, ckpt_path), ...]`` in deterministic order."""
+    exclude = exclude or set()
     if single:
         ckpt = Path(single)
         if not ckpt.is_file():
@@ -234,6 +196,8 @@ def discover_checkpoints(checkpoint_dir: str, variant: str | None,
         if not d.is_dir():
             continue
         attn = VARIANT_ATTN.get(d.name, d.name)
+        if d.name in exclude or attn in exclude:
+            continue
         if variant is not None and variant not in (d.name, attn):
             continue
         ckpts = sorted(list(d.glob("*.ckpt")) + list(d.glob("*.pt")))
@@ -245,7 +209,7 @@ def discover_checkpoints(checkpoint_dir: str, variant: str | None,
     if not items:
         raise FileNotFoundError(
             f"No *.ckpt files found under {root}. "
-            "Expected one sub-directory per model variant (gdn-muon/gka/gla/kda)."
+            "Expected one sub-directory per model variant (gdn-muon/gla/kda)."
         )
     return items
 
@@ -272,20 +236,8 @@ def load_tokenizer(tokenizer_name: str, hf_token: str | None):
 # --------------------------------------------------------------------------- #
 # One checkpoint
 # --------------------------------------------------------------------------- #
-def _pick_score(metrics):
-    """Return the 'score' value from a lm-eval metric dict, tolerating both
-    'score' and 'score,<filter>' key styles."""
-    if not isinstance(metrics, dict):
-        return None
-    for key, val in metrics.items():
-        if key == "score" or key.startswith("score,"):
-            if isinstance(val, (int, float)):
-                return val
-    return None
-
-
 def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
-                       config_overrides: dict) -> None:
+                       config_overrides: dict) -> dict:
     ckpt_name = ckpt_path.stem
     log.info("=" * 70)
     log.info("Evaluating checkpoint: %s  [attn_impl=%s]", ckpt_path, attn_impl)
@@ -310,7 +262,7 @@ def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
     model.eval()
     model.device = torch.device(args.device)
 
-    lm = MiddleTruncHFLM(
+    lm = HFLM(
         pretrained=model,
         tokenizer=tokenizer,
         backend="causal",
@@ -325,8 +277,7 @@ def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
     tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
 
     # Per-checkpoint request cache -> resume after a restart. The cache is keyed
-    # only by prompt+gen_kwargs, so it MUST be separated per checkpoint (otherwise
-    # different models would read each other's cached outputs).
+    # only by prompt + gen_kwargs, so it MUST be separated per checkpoint.
     if args.no_cache:
         use_cache = None
     else:
@@ -343,6 +294,7 @@ def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
         limit=args.limit,
         use_cache=use_cache,
         cache_requests=args.cache_requests,
+        include_path=str(HERE / "tasks"),
         log_samples=False,
         apply_chat_template=False,
         confirm_run_unsafe_code=True,
@@ -359,15 +311,12 @@ def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
         json.dump(results, f, indent=2, default=str)
     log.info("Saved results to %s", out_json)
 
-    # lightweight per-checkpoint summary
-    task_results = results.get("results", {})
-    groups = results.get("groups", {})
+    scores = compute_scores(results.get("results", {}))
     summary = {
         "checkpoint": str(ckpt_path),
         "variant": ckpt_path.parent.name,
         "attn_impl": attn_impl,
-        "longbench_score": _pick_score(groups.get("longbench", {})),
-        "per_task": {k: _pick_score(v) for k, v in task_results.items()},
+        "scores": scores,
     }
     return summary
 
@@ -376,13 +325,15 @@ def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
 # Main
 # --------------------------------------------------------------------------- #
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run LongBench for lmtemplate checkpoints under checkpoints/.")
+    p = argparse.ArgumentParser(description="Run CRIR (commonsense + ICR) for lmtemplate checkpoints.")
     p.add_argument("--checkpoint-dir", type=str, default="./checkpoints",
-                   help="Root dir containing one sub-dir per model variant (gdn-muon/gka/gla/kda).")
+                   help="Root dir containing one sub-dir per model variant (gdn-muon/gla/kda).")
     p.add_argument("--checkpoint", type=str, default=None,
                    help="Run a single .ckpt file instead of auto-discovery (use with --variant).")
     p.add_argument("--variant", type=str, default=None,
-                   help="Only run this variant (dir name or attn_impl: gdn-muon/gdn/gla/kda/gka).")
+                   help="Only run this variant (dir name or attn_impl: gdn-muon/gdn/gla/kda).")
+    p.add_argument("--exclude-variant", type=str, default="gka",
+                   help="Comma-separated variant names/dirs to skip (default: gka).")
     p.add_argument("--filter", type=str, default=None,
                    help="Only run checkpoints whose filename contains this substring (e.g. '20bt').")
 
@@ -400,13 +351,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tokenizer", type=str, default="./tokenizer",
                    help="Tokenizer name or local path (default: ./tokenizer, the bundled Llama tokenizer).")
     p.add_argument("--hf-token", type=str, default=None,
-                   help="HuggingFace token for the gated Llama-2 tokenizer. Defaults to $HF_TOKEN.")
+                   help="HuggingFace token for a gated tokenizer. Defaults to $HF_TOKEN.")
 
-    p.add_argument("--tasks", type=str, default="longbench_e,longbench_summarization_e,longbench_synthetic_e",
-                   help="lm-eval task/group names (默认：完整 LongBench-E 13 任务 = "
-                        "longbench_e + summarization_e + synthetic_e)。v1 用 longbench。")
-    p.add_argument("--max-length", type=int, default=65536)
-    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--tasks", type=str, default=",".join(TASK_NAMES),
+                   help="lm-eval task names (default: the 14 CRIR tasks).")
+    p.add_argument("--max-length", type=int, default=2048,
+                   help="Context length. The paper uses 2K for ICR; commonsense tasks are shorter.")
+    p.add_argument("--batch-size", type=int, default=1,
+                   help="Batch size. Keep 1: this model's generate() does not do per-sequence EOS masking.")
     p.add_argument("--limit", type=float, default=None,
                    help="Run only N samples per task (or a fraction <1) — smoke test only.")
     p.add_argument("--dtype", type=str, default="bfloat16", choices=["bfloat16", "float16", "float32"])
@@ -423,6 +375,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache-requests", action="store_true",
                    help="Also cache dataset-request building.")
     return p.parse_args()
+
+
+def _fmt(v) -> str:
+    if isinstance(v, float):
+        return f"{v:.4f}"
+    return str(v)
 
 
 def main() -> None:
@@ -446,35 +404,31 @@ def main() -> None:
     )
     log.info("Tokenizer: %s (vocab %d)", tokenizer.name_or_path, tokenizer.vocab_size)
 
-    checkpoints = discover_checkpoints(args.checkpoint_dir, args.variant, args.checkpoint, args.filter)
+    exclude = {v.strip() for v in (args.exclude_variant or "").split(",") if v.strip()}
+    checkpoints = discover_checkpoints(
+        args.checkpoint_dir, args.variant, args.checkpoint, args.filter, exclude=exclude
+    )
     log.info("Found %d checkpoint(s) to evaluate.", len(checkpoints))
 
     summaries = []
     for attn_impl, ckpt_path in checkpoints:
         try:
-            summary = run_one_checkpoint(attn_impl, ckpt_path, tokenizer, args, config_overrides)
-            summaries.append(summary)
+            summaries.append(run_one_checkpoint(attn_impl, ckpt_path, tokenizer, args, config_overrides))
         except NotImplementedError as e:
             log.error("Skipping %s: %s", ckpt_path, e)
 
-    # combined summary table
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    run_name = args.run_name or "summary"
-    summary_json = out_dir / f"{run_name}.json"
+    summary_json = out_dir / f"{args.run_name or 'summary'}.json"
     with open(summary_json, "w", encoding="utf-8") as f:
         json.dump(summaries, f, indent=2, default=str)
 
-    print("\n================ LongBench summary ================")
+    print("\n================ CRIR summary ================")
     for s in summaries:
-        print(f"{s['variant']:<12} {s['checkpoint']:<60} longbench={_fmt(s['longbench_score'])}")
+        sc = s.get("scores", {})
+        print(f"{s['variant']:<12} {s['checkpoint']:<60}")
+        print(f"  Commonsense Avg = {_fmt(sc.get('Commonsense Avg'))}   ICR Avg = {_fmt(sc.get('ICR Avg'))}")
     print(f"\nSummary saved to: {summary_json}")
-
-
-def _fmt(v) -> str:
-    if isinstance(v, float):
-        return f"{v:.4f}"
-    return str(v)
 
 
 if __name__ == "__main__":

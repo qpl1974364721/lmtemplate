@@ -20,12 +20,14 @@ jinja2
 pyyaml
 
 # --- lmtemplate 架构依赖 ---
-# `fla` 由 flash-linear-attention 提供 (ShortConvolution / GatedMLP / FusedLinearCrossEntropyLoss)
-# 注意: gka 模型用的 fla.layers.gka.GatedKalmaNet 不在官方包里, 需要 Undermyth 的 fork (fix/mesa-cg 分支):
-#   pip install -e "git+https://github.com/Undermyth/flash-linear-attention@fix/mesa-cg#egg=flash-linear-attention"
+# `fla` 由 flash-linear-attention 提供 (ShortConvolution / GatedMLP /
+# FusedLinearCrossEntropyLoss)。本仓库只跑 gla/gdn/kda，不跑 gka，因此官方
+# flash-linear-attention 即可，不需要 Undermyth 的 fork。
 flash-linear-attention>=0.4.1
-# 标准 softmax FlashAttention 内核 (ALL_ATTENTION_FUNCTIONS['flash_attention_2'])
+# 标准 softmax FlashAttention 内核 (仅 attn_impl="attention" 需要)
 flash-attn
 
-# --- lm-eval-harness 与 LongBench 指标 (jieba/fuzzywuzzy/rouge) ---
-lm-eval[longbench]>=0.4.9
+# --- lm-eval-harness ---
+# CRIR 的 9 个 commonsense 任务用 stock lm-eval；5 个 ICR 任务已本地化在
+# ./tasks/ 下，不依赖 harness 是否自带 fda/swde/squad_completion。
+lm-eval>=0.4.9

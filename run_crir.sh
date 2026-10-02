@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 非 Slurm 直接运行 (交互式节点 / salloc 已申请 GPU)
-# 用法:  bash run_longbench.sh
+# 非 Slurm 直接运行 CRIR 测评 (交互式节点 / salloc 已申请 GPU)
+# 用法:  bash run_crir.sh
+# 测评:  gla / gdn / kda 三个模型 20bt checkpoint
+#        Commonsense Reasoning (9) + In-context Retrieval (5)
 # =============================================================================
 set -euo pipefail
 
@@ -24,20 +26,23 @@ CONDA_BASE="$(cd "$(dirname "$CONDA_BIN")/.." && pwd)"
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate slai_eval            # <<< 按环境名修改
 
-# 国内镜像端点：LongBench 数据集(公开)从 hf-mirror 下载，无需 HF 账号
+# 国内镜像端点：CRIR 数据集(公开)从 hf-mirror 下载，无需 HF 账号
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/home/qpl/.cache/huggingface   # 数据集缓存放到持久目录，容器重启不丢
 
 mkdir -p logs results cache
 
-python eval_longbench.py \
+# 第一次跑 CRIR 前请清掉旧的 longbench 缓存/结果: rm -rf cache results
+python eval_crir.py \
     --checkpoint-dir ./checkpoints \
     --filter 20bt \
+    --exclude-variant gka \
     --tokenizer ./tokenizer \
-    --tasks longbench_e,longbench_summarization_e,longbench_synthetic_e \
-    --max-length 65536 \
+    --max-length 2048 \
     --batch-size 1 \
     --device cuda:0 \
     --output-dir ./results \
     --use-cache ./cache \
-    2>&1 | tee logs/eval_manual.log
+    2>&1 | tee logs/eval_crir_manual.log
+
+python make_crir_table.py
