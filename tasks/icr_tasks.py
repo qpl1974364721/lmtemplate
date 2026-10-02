@@ -115,6 +115,10 @@ class _QATask(ConfigurableTask):
     def validation_docs(self):
         return self.dataset["validation"]
 
+    def doc_to_target(self, doc):
+        answer_list = doc.get("answers") or []
+        return " " + (answer_list[0] if answer_list else "unanswerable")
+
     def _doc_to_text(self, doc):
         context = self._clean_context(doc["context"].strip())
         question = doc["question"].strip()
