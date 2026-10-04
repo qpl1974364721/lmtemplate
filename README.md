@@ -9,7 +9,7 @@ CRIR 对应论文 [Preconditioned DeltaNet](https://arxiv.org/abs/2604.21100)（
 - **Commonsense Reasoning（常识推理，9 个）**：LAMBADA、WikiText、ARC-Easy、ARC-Challenge、
   HellaSwag、PIQA、WinoGrande、BoolQ、SciQ
 - **In-context Retrieval（上下文检索，5 个）**：FDA、SWDE、SQuAD、TriviaQA（TQA）、DROP，
-  2K 上下文，cloze 补全 + "contains" 准确率
+  4K 上下文，cloze 补全 + "contains" 准确率
 
 所有任务都通过 lm-eval-harness 零样本评测。5 个 ICR 任务已本地化在 `tasks/` 下（因为官方 harness
 只在新版本才带 `fda/swde/squad_completion`，并且一直没有 cloze 版 TriviaQA / DROP）。

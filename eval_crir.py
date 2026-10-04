@@ -357,8 +357,8 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--tasks", type=str, default=",".join(TASK_NAMES),
                    help="lm-eval task names (default: the 14 CRIR tasks).")
-    p.add_argument("--max-length", type=int, default=2048,
-                   help="Context length. The paper uses 2K for ICR; commonsense tasks are shorter.")
+    p.add_argument("--max-length", type=int, default=4096,
+                   help="Context length (4K). 48 tokens are reserved for generation.")
     p.add_argument("--batch-size", type=int, default=1,
                    help="Batch size. Keep 1: this model's generate() does not do per-sequence EOS masking.")
     p.add_argument("--limit", type=float, default=None,

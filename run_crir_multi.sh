@@ -60,7 +60,7 @@ for ((gpu=0; gpu<NUM_GPUS; gpu++)); do
           --checkpoint "$ckpt" \
           --variant "$variant" \
           --tokenizer ./tokenizer \
-          --max-length 2048 \
+          --max-length 4096 \
           --batch-size 1 \
           --device cuda:0 \
           --output-dir ./results \
