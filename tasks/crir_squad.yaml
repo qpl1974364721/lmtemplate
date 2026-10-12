@@ -1,2 +1,0 @@
-task: crir_squad
-class: !function icr_tasks.SQUADCompletion

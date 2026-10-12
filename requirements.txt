@@ -1,33 +1,16 @@
-# =============================================================================
-# 环境依赖 (SLAI 集群 / H100)
-#
-# 注意：torch 必须与集群的 CUDA 版本匹配，建议先用 setup_env.sh 安装带 CUDA
-# 的官方 torch wheel，再执行 `pip install -r requirements.txt`。
-# =============================================================================
+# attnbench 依赖 (SLAI 集群 / H100)
 
-# --- 深度学习基础 (torch 单独安装以匹配 CUDA，见 setup_env.sh) ---
-torch>=2.1
-transformers>=4.46
-accelerate>=0.26.0
+# 深度学习基础：torch 需要带 CUDA，单独装以匹配集群 CUDA 版本
+torch
+
+# flash-linear-attention：必须用 elvisnunez7 的 gka 分支（同时包含 PR#1352 的
+#   fla.ops.gka 和 fla-org main 的 fla.ops.mesa_net），不要装官方 main：
+#   pip install -e "git+https://github.com/elvisnunez7/flash-linear-attention@gka#egg=flash-linear-attention"
+flash-linear-attention
+
+# attnbench 运行时依赖
 einops
 jaxtyping
-safetensors
-huggingface_hub
-datasets
-numpy
-tqdm
-jinja2
+rich
 pyyaml
-
-# --- lmtemplate 架构依赖 ---
-# `fla` 由 flash-linear-attention 提供 (ShortConvolution / GatedMLP /
-# FusedLinearCrossEntropyLoss)。本仓库只跑 gla/gdn/kda，不跑 gka，因此官方
-# flash-linear-attention 即可，不需要 Undermyth 的 fork。
-flash-linear-attention>=0.4.1
-# 标准 softmax FlashAttention 内核 (仅 attn_impl="attention" 需要)
-flash-attn
-
-# --- lm-eval-harness ---
-# CRIR 的 9 个 commonsense 任务用 stock lm-eval；5 个 ICR 任务已本地化在
-# ./tasks/ 下，不依赖 harness 是否自带 fda/swde/squad_completion。
-lm-eval>=0.4.9
+triton

@@ -1,199 +1,99 @@
-# CRIR 评测代码（Anti-Hebbian Attention / 线性注意力基线）
+# attnbench：gla / kda / gka / mesa_net 效率测评（H100）
 
-在 **SLAI 集群（H100）** 上，用 [lm-eval-harness](https://github.com/EleutherAI/lm-evaluation-harness)
-对 `lmtemplate` 训练的 **gla / gdn / kda 三个模型**跑 **CRIR** 基准。
+用 [Undermyth/attnbench](https://github.com/Undermyth/attnbench) 这套框架，对
+4 个注意力变体的**执行效率**（延迟 / 吞吐）做横向对比。测评内容对应 fla-org 的
+PR [fla-org/flash-linear-attention#1352](https://github.com/fla-org/flash-linear-attention/pull/1352)
+（“[GKA] Add Gated KalmaNet op, layer, and model”）。
 
-CRIR 对应论文 [Preconditioned DeltaNet](https://arxiv.org/abs/2604.21100)（arXiv:2604.21100）Table 4
-的两大类下游任务：
+## 测什么
 
-- **Commonsense Reasoning（常识推理，9 个）**：LAMBADA、WikiText、ARC-Easy、ARC-Challenge、
-  HellaSwag、PIQA、WinoGrande、BoolQ、SciQ
-- **In-context Retrieval（上下文检索，5 个）**：FDA、SWDE、SQuAD、TriviaQA（TQA）、DROP，
-  4K 上下文，cloze 补全 + "contains" 准确率
+| 变体 | 内核来源 | attnbench core |
+|---|---|---|
+| `gla` | fla `chunk_simple_gla` / `fused_recurrent_simple_gla` | `attnbench/cores/gla.py`（框架自带） |
+| `kda` | fla `chunk_kda` / `fused_recurrent_kda` | `attnbench/cores/kda.py`（框架自带） |
+| `gka` | fla `chunk_gka` / `fused_recurrent_gka`（PR #1352） | `attnbench/cores/gka.py`（**已改为 PR 版内核**） |
+| `mesa_net` | fla `chunk_mesa_net` / `mesa_net_decoding_one_step` | `attnbench/cores/mesa_net.py`（**新增**） |
 
-所有任务都通过 lm-eval-harness 零样本评测。5 个 ICR 任务已本地化在 `tasks/` 下（因为官方 harness
-只在新版本才带 `fda/swde/squad_completion`，并且一直没有 cloze 版 TriviaQA / DROP）。
+对每个 (变体 × batch × 序列长度 × prefill/decode) 组合测量：
 
-- 架构：`https://github.com/Undermyth/lmtemplate`（核心已拷到本目录 `module/`）
-- 权重：服务器上 `checkpoints/` 下的 Lightning `.ckpt` 文件（不从 HuggingFace 下载）
+- 单层 attention 延迟（in-model）、attention/(attention+mlp) 占比；
+- 整模型 tokens/s（prefill 为 trunk 墙钟时间；decode 为完整生成步含 lm_head）；
+- 可选的 core-only 微基准（chunk / recurrent 内核延迟）。
 
----
+## 对本仓库相对上游 attnbench 的改动
 
-## 模型与权重
+1. **`attnbench/cores/gka.py` 重写**：上游 gka core 用的是项目早期的
+   `fla.ops.gka.gka_chebyshev_solve`（`gka_chebyshev_gla` / `torch_decoding_one_step`）。
+   现在换成 PR #1352 的正式内核 `fla.ops.gka.chunk_gka` / `fused_recurrent_gka`
+   （接口 `g/gk/alpha/scale/ridge_ratio/num_iter/initial_state`）。
+2. **新增 `attnbench/cores/mesa_net.py`**：按 fla-org 的 `fla/layers/mesa_net.py`
+   对齐数学（q/k L2 归一化、`g=logsigmoid(a)`、`beta=sigmoid(b)`、逐 (head, key_dim)
+   的 `lamb=softplus(lambda_params)+lower_bound`），接 `chunk_mesa_net` /
+   `mesa_net_decoding_one_step`。
+3. **新增 `configs/gla_kda_gka_mesa.yaml`**：4 变体、0.4B 骨架
+   （dim=1024, n_heads=8, head_dim=128）、batch ∈ {1,4,8}、seq ∈ {512,2048,8192}、
+   bf16、prefill+decode+microbench 全开。
 
-`checkpoints/` 下每个子目录是一个模型族，里面是不同训练 token 数（5bt ~ 38bt）的 checkpoint：
+## 服务器环境（重要）
 
-| 目录 | 模型 | 架构（`attn_impl`） |
-|------|------|--------------------|
-| `gdn-muon/` | Gated DeltaNet | `gdn` → `fla.layers.gated_deltanet.GatedDeltaNet` |
-| `gla/` | Gated Linear Attention | `gla` → `fla.layers.simple_gla.SimpleGatedLinearAttention` |
-| `kda/` | Kalman Delta Attention | `kda` → `fla.layers.kda.KimiDeltaAttention` |
-| `gka/` | Gated KalmaNet | `gka` → `fla.layers.gka.GatedKalmaNet`（本次**不跑**） |
+框架依赖：`torch`(CUDA)、`flash-linear-attention`(fla)、`einops`、`jaxtyping`、
+`rich`、`pyyaml`、`triton`。
 
-`gdn-muon` 的 `muon` 表示用 Muon 优化器训练，文件名里的 `0.4b` 表示约 0.4B 参数
-（`dim=1024, n_layers=24`）；`bt` 是训练的十亿 token 数，`step` 是训练步数。
-
-本次默认只跑 `20bt` 的 checkpoint，且排除 gka：
-
-- `checkpoints/gla/gla-0.4b-muon-20bt-step40960.ckpt`
-- `checkpoints/gdn-muon/gdn-0.4b-muon-20bt-step40960.ckpt`
-- `checkpoints/kda/kda-0.4b-muon-20bt-step40960.ckpt`
-
----
-
-## 目录结构
-
-```
-.
-├── module/                 # 架构代码（modeling.py 内含 attn_impl 开关）
-├── tasks/                  # 本地化的 5 个 ICR 任务（icr_tasks.py + 5 个 yaml）
-├── crir_bench.py           # 任务列定义 / 指标抽取 / 两组平均分（eval 与表格共用）
-├── eval_crir.py            # 主脚本：发现 checkpoints/ 下 .ckpt 并逐个跑 CRIR
-├── make_crir_table.py      # 汇总脚本：生成论文 Table 4 风格的表格
-├── tokenizer/              # 已下载到本地的 Llama-2 tokenizer（无需 HF 登录）
-├── requirements.txt
-├── setup_env.sh
-├── run_crir.slurm          # Slurm 作业（H100）
-├── run_crir.sh             # 交互式单卡直接运行
-├── run_crir_multi.sh       # 多卡分片并行运行（NUM_GPUS=N）
-└── README.md
-```
-
-### 对架构源码的改动
-
-`lmtemplate` 的多个分支只差 `Layer` 里 attention 这一行。这里把 `module/modeling.py` 合并成一个文件，
-用 `ModelConfig.attn_impl` 选择注意力核：`gla` / `gdn` / `kda` 对应 fla 层。另保留两处让 lm-eval 能
-正确接管的修复：`tie_weights()` no-op + `tie_word_embeddings=False`。
-
----
-
-## 一、环境准备
+**关键：fla 必须同时包含 `fla.ops.gka`（PR #1352 版）和 `fla.ops.mesa_net`。**
+二者都包含在 PR 的分支里（该分支 = fla-org main + GKA），所以直接装它即可：
 
 ```bash
-bash setup_env.sh                 # 建 conda 环境 slai_eval 并装依赖
 source /home/qpl/miniconda3/etc/profile.d/conda.sh
-conda activate slai_eval
+conda activate slai_eval            # 或新建一个专门环境，避免动到 CRIR 评测环境
+
+pip install rich
+pip install -e "git+https://github.com/elvisnunez7/flash-linear-attention@gka#egg=flash-linear-attention"
+# 国内网络不行的话先 clone 再本地 install：
+#   git clone -b gka https://github.com/elvisnunez7/flash-linear-attention && pip install -e ./flash-linear-attention
 ```
 
-> **不需要 HF 登录**：tokenizer 已下载到本地 `./tokenizer`；CRIR 数据集都是公开的，
-> 脚本里已设置 `HF_ENDPOINT=https://hf-mirror.com` 走国内镜像下载。
+> 注意：PR 自述里提到 bf16/fp16 且 head dim K<64（或 V<32）时 `chunk_gka`
+> 反向会报错（Triton 3.7.1 的 bug）；本测评是**前向延迟**，且 head_dim=128，
+> 不受此限制。torch/triton 版本建议与 PR 测试环境接近（torch 2.12、triton 3.7）。
 
-`flash-linear-attention`（`fla`）的版本会影响 fla 层的参数名/接口，**必须与训练 checkpoint 时使用的版本兼容**。
-本次只跑 gla/gdn/kda，用官方 `flash-linear-attention>=0.4.1` 即可，不需要 gka 的 Undermyth fork。
-
----
-
-## 二、运行
-
-### 第一次跑之前（重要）
-
-旧 LongBench 的缓存/结果和 CRIR 不通用，先清掉：
+## 运行
 
 ```bash
-rm -rf cache results
+cd /home/qpl/code/lmtemplate     # 或你放本仓库的位置
+bash run_attnbench.sh
 ```
 
-### Slurm 提交（推荐）
-
-改 `run_crir.slurm` 里的 `--partition` / `--gres` / 环境名，然后：
+等价的手动步骤：
 
 ```bash
-sbatch run_crir.slurm
+cd attnbench
+python -m attnbench --list-variants                                    # 确认注册了 gla/kda/gka/mesa_net
+python -m attnbench --config configs/gla_kda_gka_mesa.yaml --dry-run    # 打印解析后的计划
+python -m attnbench --config configs/gla_kda_gka_mesa.yaml              # 正式跑
 ```
 
-### 交互式（单卡）
+结果输出到 `attnbench/results/<timestamp>_h100/`：
+
+- `results.txt`：终端表格（rich）
+- `results.json`：全量细节（每次迭代的耗时数组 + 环境元信息）
+- `results.csv`：长表（便于 pivot）
+
+汇总对比（可选）：
 
 ```bash
-bash run_crir.sh
+python scripts/summarize.py results/<run_dir> --vs gla   # 各变体相对 gla 的倍率
 ```
 
-### 多卡并行（推荐，提速）
+## 结果格式说明（和 PR #1352 的差异）
 
-```bash
-nvidia-smi -L                     # 看实例有几张卡
-NUM_GPUS=3 bash run_crir_multi.sh # 3 个 checkpoint，3 张卡正好并行
-```
+PR #1352 里的表格是 **fla 自己的 kernel 基准**（`benchmarks/ops/`），列是
+`fwd (ms) / fwd+bwd (ms) / working memory (GB) / decode (µs)`，而且 head 数用 H=32。
 
-### 直接用 `eval_crir.py`
+attnbench 测的是**整模型前向延迟/吞吐**（不含训练反向），列是
+`attn_ms / attn_ratio / tps / chunk_ms / recurrent_ms`，head 数沿用我们 0.4B
+模型的 H=8、head_dim=128。
 
-```bash
-# 全部 gla/gdn/kda 的 20bt checkpoint（自动发现并排除 gka）
-python eval_crir.py --checkpoint-dir ./checkpoints --filter 20bt --exclude-variant gka
-
-# 只跑某个模型族
-python eval_crir.py --filter 20bt --variant gla
-
-# 只跑单个 checkpoint
-python eval_crir.py --checkpoint ./checkpoints/gla/gla-0.4b-muon-20bt-step40960.ckpt --variant gla
-
-# 冒烟测试（每个任务只跑 5 条，注意：多数 commonsense 任务是 loglikelihood，
-# --limit 5 也足够验证能加载、能算 logprob、能生成）
-python eval_crir.py --limit 5
-```
-
-结果写入 `results/<目录名>/<checkpoint名>/results.json`，并在 `results/summary.json` 汇总每个
-checkpoint 的各列分数与两组平均分。
-
----
-
-## 三、任务与指标
-
-| 组 | 任务 | lm-eval 任务名 | 指标（表里展示） |
-|----|------|---------------|------------------|
-| Commonsense | LAMBADA | `lambada_openai` | `perplexity`（ppl↓）+ `acc` |
-| Commonsense | WikiText | `wikitext` | `word_perplexity`（ppl↓） |
-| Commonsense | ARC-Easy | `arc_easy` | `acc` |
-| Commonsense | ARC-Challenge | `arc_challenge` | `acc_norm`（表里写作 acc_n） |
-| Commonsense | HellaSwag | `hellaswag` | `acc_norm` |
-| Commonsense | PIQA | `piqa` | `acc` |
-| Commonsense | WinoGrande | `winogrande` | `acc` |
-| Commonsense | BoolQ | `boolq` | `acc` |
-| Commonsense | SciQ | `sciq` | `acc` |
-| ICR | FDA | `crir_fda`（本地） | `contains` |
-| ICR | SWDE | `crir_swde`（本地） | `contains` |
-| ICR | SQuAD | `crir_squad`（本地） | `contains` |
-| ICR | TriviaQA | `crir_tqa`（本地） | `contains` |
-| ICR | DROP | `crir_drop`（本地） | `contains` |
-
-- **Commonsense Avg** = 8 个准确率任务的均值（ARC-E、ARC-C、HellaSwag、LAMBADA、PIQA、
-  WinoGrande、BoolQ、SciQ；**不含** LAMB/Wiki 的 ppl）。
-- **ICR Avg** = 5 个 ICR `contains` 准确率的均值。
-
-ICR 的 5 个任务都是 zero-shot cloze 补全（`generate_until`，`until="\n"`，最多生成 48 token），
-分数是「生成串里是否包含正确答案」的 case-insensitive 子串匹配准确率，与论文一致。
-
----
-
-## 四、结果解读
-
-每个 checkpoint 的完整结果在 `results/<族>/<checkpoint>/results.json`，汇总在 `results/summary.json`。
-
-```bash
-python make_crir_table.py
-```
-
-会读 `results/*/*/results.json`，生成论文 Table 4 风格的表格：
-
-- `results/crir_table.md`（Markdown 表）
-- `results/crir_table.csv`（同款列）
-
-准确率已 ×100（如 44.49 表示 44.49%），ppl 保持原值（越低越好）。
-
----
-
-## 五、断点续跑
-
-每个 checkpoint 用独立的请求缓存（默认 `cache/<checkpoint>.sqlite`，lm-eval 会加 `_rank0.db` 后缀）。
-`run_crir.slurm` 里已加 `#SBATCH --requeue`，节点重启/被抢占后自动重新排队，重跑自动续算。
-
-**注意**：缓存 key 只和 prompt+生成参数有关，不区分模型权重。换权重/配置/seed/任务后要 `rm -rf cache/`。
-
----
-
-## 六、常见问题
-
-1. **数据集下载慢/失败**：脚本已用 `HF_ENDPOINT=https://hf-mirror.com` 走国内镜像；tokenizer 是本地 `./tokenizer`，无需 HF 登录。
-2. **权重 key 对不上**：优先怀疑 fla 版本不一致；再用 `--n-layers/--dim/...` 对齐配置。
-3. **先冒烟测试**：正式跑之前先 `--limit 5` 确认能加载、能算 logprob、能生成。
-4. **batch-size 保持 1**：`modeling.py` 的 `generate()` 不做逐条 EOS 掩码，批生成会提前/延后截断。
-5. **gka 已排除**：默认 `--exclude-variant gka`，且多卡脚本只收集 gla/gdn-muon/kda 三个目录。
+两者度量不同：attnbench 更适合回答“整模型推理/训练前向有多快、attention 占多少”，
+PR 的表更适合回答“这个 kernel 本身 fwd/bwd 各多少毫秒、吃多少显存”。
+如果你需要**和 PR 完全一致的 fwd/fwd+bwd/显存表**，那要用 fla 的
+`benchmarks/ops/` 脚本跑，而不是 attnbench；需要的话我再补一套。
