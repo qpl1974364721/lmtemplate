@@ -1,0 +1,35 @@
+# attnbench: benchmark gla / kda / gka / mesa_net on H100
+# CLI overrides take precedence (e.g. --batch 1,4,8 --seq 512,2048,8192)
+
+model:
+  vocab_size: 32000
+  n_layers: 24
+  dim: 1024
+  n_heads: 8            # head_dim = 1024 // 8 = 128
+  expand_ratio: 4
+  use_short_conv: true
+  conv_size: 4
+
+variants: [gla, kda, gka, mesa_net]
+variant_opts: {}        # e.g. {gka: {num_iter: [5, 15, 30]}} to sweep Chebyshev iterations
+
+specs:
+  batch_sizes: [1, 4, 8]
+  seq_lens: [512, 2048, 8192]
+  # pairs:
+  #   - [16, 1024]
+
+decode:
+  new_tokens: 256       # decode steps per timed round (state chains from prefill)
+
+bench:
+  dtype: bfloat16
+  warmup: 3
+  iters: 10
+  seed: 0
+  microbench: true      # additionally measure isolated core-only kernel latency
+
+report:
+  out_dir: results
+  formats: [table, json, csv]
+  tag: h100

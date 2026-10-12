@@ -1,0 +1,36 @@
+# attnbench default benchmark configuration
+# CLI overrides take precedence (e.g. --variants kda,gla --batch 1,4 --seq 512,2048)
+
+model:
+  vocab_size: 32000
+  n_layers: 24
+  dim: 1024
+  n_heads: 8            # head_dim = dim // n_heads
+  expand_ratio: 4
+  use_short_conv: true
+  conv_size: 4
+
+variants: [softmax, gla, kda, gdn, gka]
+variant_opts: {}        # per-variant config overrides, e.g. {kda: {allow_neg_eigval: true}}
+
+specs:                  # cartesian grid; explicit pairs can be added via `pairs`
+  batch_sizes: [1, 4, 8]
+  seq_lens: [512, 2048, 8192]
+  # pairs:
+  #   - [2, 1536]
+  #   - {batch_size: 16, seq_len: 4096}
+
+decode:
+  new_tokens: 256       # decode steps per timed round (state chains from prefill)
+
+bench:
+  dtype: bfloat16
+  warmup: 3
+  iters: 10
+  seed: 0
+  microbench: true      # additionally measure isolated core-only kernel latency
+
+report:
+  out_dir: results
+  formats: [table, json, csv]
+  tag: null             # results subdir suffix; null -> timestamp only
