@@ -105,13 +105,14 @@ class MesaNetCore(AttnCore):
                 )
             else:
                 prev_h_kk, prev_h_kv = state
+                # kernel expects [B, H, K] (squeeze the seq dim T=1, not batch)
                 o, h_kk, h_kv = mesa_net_decoding_one_step(
-                    q=q.squeeze(0), k=k.squeeze(0), v=v.squeeze(0),
-                    g=g.squeeze(0), beta=beta.squeeze(0), lamb=lamb,
+                    q=q.squeeze(1), k=k.squeeze(1), v=v.squeeze(1),
+                    g=g.squeeze(1), beta=beta.squeeze(1), lamb=lamb,
                     prev_h_kk=prev_h_kk, prev_h_kv=prev_h_kv,
                     max_CG_iteration=self.config.max_cg_iteration,
                 )
-                o = o.unsqueeze(0).to(q)
+                o = o.unsqueeze(1).to(q)
             new_state = (h_kk, h_kv)
 
         return o, new_state
