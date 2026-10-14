@@ -12,7 +12,7 @@ Everything is evaluated with lm-evaluation-harness in a zero-shot setting. The
 five ICR tasks are vendored under ``tasks/`` (see ``tasks/icr_tasks.py``) because
 the harness does not ship the cloze TriviaQA / DROP tasks.
 
-The script discovers ``*20bt*.ckpt`` checkpoints (excluding gka), loads each one,
+The script discovers ``*20bt*.ckpt`` checkpoints, loads each one,
 wraps the model with lm-eval's ``HFLM`` and evaluates the CRIR task list. Results
 are cached per checkpoint so a restart resumes without re-running finished
 requests.
@@ -26,7 +26,7 @@ Server layout::
         gdn-muon/gdn-0.4b-muon-*.ckpt   -> Gated DeltaNet       (attn_impl="gdn")
         gla/    gla-0.4b-muon-*.ckpt     -> Gated Linear Attention (attn_impl="gla")
         kda/    kda-0.4b-muon-*.ckpt     -> Kimi Delta Attention (attn_impl="kda")
-        gka/    gka-*.ckpt               -> Gated KalmaNet      (attn_impl="gka", excluded)
+        gka/    gka-*.ckpt               -> Gated KalmaNet      (attn_impl="gka")
 """
 
 from __future__ import annotations
@@ -329,13 +329,13 @@ def run_one_checkpoint(attn_impl: str, ckpt_path: Path, tokenizer, args,
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run CRIR (commonsense + ICR) for lmtemplate checkpoints.")
     p.add_argument("--checkpoint-dir", type=str, default="./checkpoints",
-                   help="Root dir containing one sub-dir per model variant (gdn-muon/gla/kda).")
+                   help="Root dir containing one sub-dir per model variant (gdn-muon/gla/kda/gka).")
     p.add_argument("--checkpoint", type=str, default=None,
                    help="Run a single .ckpt file instead of auto-discovery (use with --variant).")
     p.add_argument("--variant", type=str, default=None,
-                   help="Only run this variant (dir name or attn_impl: gdn-muon/gdn/gla/kda).")
-    p.add_argument("--exclude-variant", type=str, default="gka",
-                   help="Comma-separated variant names/dirs to skip (default: gka).")
+                   help="Only run this variant (dir name or attn_impl: gdn-muon/gdn/gla/kda/gka).")
+    p.add_argument("--exclude-variant", type=str, default=None,
+                   help="Comma-separated variant names/dirs to skip.")
     p.add_argument("--filter", type=str, default=None,
                    help="Only run checkpoints whose filename contains this substring (e.g. '20bt').")
 

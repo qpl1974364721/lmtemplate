@@ -28,16 +28,17 @@ CRIR 对应论文 [Preconditioned DeltaNet](https://arxiv.org/abs/2604.21100)（
 | `gdn-muon/` | Gated DeltaNet | `gdn` → `fla.layers.gated_deltanet.GatedDeltaNet` |
 | `gla/` | Gated Linear Attention | `gla` → `fla.layers.simple_gla.SimpleGatedLinearAttention` |
 | `kda/` | Kalman Delta Attention | `kda` → `fla.layers.kda.KimiDeltaAttention` |
-| `gka/` | Gated KalmaNet | `gka` → `fla.layers.gka.GatedKalmaNet`（本次**不跑**） |
+| `gka/` | Gated KalmaNet | `gka` → `fla.layers.gka.GatedKalmaNet`（可单独跑：`bash run_crir_gka.sh`） |
 
 `gdn-muon` 的 `muon` 表示用 Muon 优化器训练，文件名里的 `0.4b` 表示约 0.4B 参数
 （`dim=1024, n_layers=24`）；`bt` 是训练的十亿 token 数，`step` 是训练步数。
 
-本次默认只跑 `20bt` 的 checkpoint，且排除 gka：
+本次默认只跑 gla/gdn/kda 的 `20bt` checkpoint（排除 gka）；gka 可单独跑：
 
 - `checkpoints/gla/gla-0.4b-muon-20bt-step40960.ckpt`
 - `checkpoints/gdn-muon/gdn-0.4b-muon-20bt-step40960.ckpt`
 - `checkpoints/kda/kda-0.4b-muon-20bt-step40960.ckpt`
+- `checkpoints/gka/gka-20bt-step40960.ckpt`（单独跑 gka 时）
 
 ---
 
@@ -79,7 +80,7 @@ conda activate slai_eval
 > 脚本里已设置 `HF_ENDPOINT=https://hf-mirror.com` 走国内镜像下载。
 
 `flash-linear-attention`（`fla`）的版本会影响 fla 层的参数名/接口，**必须与训练 checkpoint 时使用的版本兼容**。
-本次只跑 gla/gdn/kda，用官方 `flash-linear-attention>=0.4.1` 即可，不需要 gka 的 Undermyth fork。
+本次默认只跑 gla/gdn/kda，用官方 `flash-linear-attention>=0.4.1` 即可。**若要跑 gka，需要 Undermyth 的 fork（`fix/mesa-cg` 分支，含 `fla.layers.gka.GatedKalmaNet`），官方 fla 没有这个层。**
 
 ---
 
@@ -117,8 +118,11 @@ NUM_GPUS=3 bash run_crir_multi.sh # 3 个 checkpoint，3 张卡正好并行
 ### 直接用 `eval_crir.py`
 
 ```bash
-# 全部 gla/gdn/kda 的 20bt checkpoint（自动发现并排除 gka）
+# 全部 gla/gdn/kda 的 20bt checkpoint（自动发现，排除 gka）
 python eval_crir.py --checkpoint-dir ./checkpoints --filter 20bt --exclude-variant gka
+
+# 单独跑 gka
+python eval_crir.py --checkpoint-dir ./checkpoints --filter 20bt --variant gka
 
 # 只跑某个模型族
 python eval_crir.py --filter 20bt --variant gla
@@ -196,4 +200,4 @@ python make_crir_table.py
 2. **权重 key 对不上**：优先怀疑 fla 版本不一致；再用 `--n-layers/--dim/...` 对齐配置。
 3. **先冒烟测试**：正式跑之前先 `--limit 5` 确认能加载、能算 logprob、能生成。
 4. **batch-size 保持 1**：`modeling.py` 的 `generate()` 不做逐条 EOS 掩码，批生成会提前/延后截断。
-5. **gka 已排除**：默认 `--exclude-variant gka`，且多卡脚本只收集 gla/gdn-muon/kda 三个目录。
+5. **gka**：默认脚本（`run_crir.sh` / `run_crir_multi.sh`）排除 gka；要单独跑 gka 用 `bash run_crir_gka.sh`（需要 Undermyth fork 的 fla，见上文）。
