@@ -80,7 +80,7 @@ conda activate slai_eval
 > 脚本里已设置 `HF_ENDPOINT=https://hf-mirror.com` 走国内镜像下载。
 
 `flash-linear-attention`（`fla`）的版本会影响 fla 层的参数名/接口，**必须与训练 checkpoint 时使用的版本兼容**。
-本次默认只跑 gla/gdn/kda，用官方 `flash-linear-attention>=0.4.1` 即可。**若要跑 gka，需要 Undermyth 的 fork（`fix/mesa-cg` 分支，含 `fla.layers.gka.GatedKalmaNet`），官方 fla 没有这个层。**
+本次默认只跑 gla/gdn/kda，用官方 `flash-linear-attention>=0.4.1` 即可。**若要跑 gka，需要 Undermyth 的 fork，锁定到 commit `45412236ed34d88aceadfd695a6d4ab1d614e4d7`（含 `fla.layers.gka.GatedKalmaNet`，且修好了 q/k 归一化的 dtype 问题）；官方 fla 没有这个层。**
 
 ---
 

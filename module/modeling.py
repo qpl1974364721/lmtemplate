@@ -109,7 +109,8 @@ def _build_attention(config: "ModelConfig", layer_idx: int) -> nn.Module:
         )
     if impl == "gka":
         # Gated KalmaNet lives in Undermyth's flash-linear-attention fork
-        # (branch `fix/mesa-cg`), not in upstream fla.
+        # (commit 4541223, which fixes the float16 q/k normalization so the
+        # kernel output keeps the model dtype), not in upstream fla.
         from fla.layers.gka import GatedKalmaNet
         return GatedKalmaNet(
             hidden_size=config.dim,

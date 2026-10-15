@@ -2,8 +2,9 @@
 # =============================================================================
 # 非 Slurm 直接运行 CRIR 测评：只跑 gka 20bt（Gated KalmaNet）
 # 用法:  bash run_crir_gka.sh
-# 注意: gka 需要 Undermyth 的 flash-linear-attention fork (fix/mesa-cg 分支)，
-#       即 fla.layers.gka.GatedKalmaNet；官方 fla 没有这个层。
+# 注意: gka 需要 Undermyth 的 flash-linear-attention fork，锁定 commit
+#       45412236ed34d88aceadfd695a6d4ab1d614e4d7（含 fla.layers.gka.GatedKalmaNet）；
+#       官方 fla 没有这个层。
 # =============================================================================
 set -euo pipefail
 
