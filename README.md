@@ -45,6 +45,7 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 | 学习率 | embedding **2e-1**，hidden **2e-2**（Muon），unembedding **2e-3** |
 | 调度 | linear warmup（0.5% ≈ 191 步）+ cosine 衰减到峰值的 10% |
 | 权重衰减 | 0 |
+| 验证 | 每 1000 步在 `val.bin` 上算一次 token 加权 loss（每卡 20 个 batch） |
 
 学习率是怎么分的（`train.py::build_optimizers`）：
 
@@ -112,6 +113,21 @@ HF_ENDPOINT=https://hf-mirror.com python prepare_data.py \
 产物：`data/fineweb_20b/train.bin`（20B tokens ≈ 40 GB）、`val.bin`、`meta.json`。
 32 个进程大约 3–6M tokens/s，20B 大概 1–2 小时（同时要写出 40 GB）。
 
+**训练集 / 验证集怎么分**：顺序切分，不是随机切分。
+
+```
+FineWeb-Edu 流（文档级已 shuffle）
+├──────────── 前 20B tokens ────────────┤├─ 接下来 10M ─┤
+            train.bin                        val.bin
+```
+
+- 训练集 = 流的前 20B token，验证集 = 紧接着的 10M token；
+- 源数据 `fineweb-edu-100b-shuffle` 本身已经全局打乱，所以尾部与头部同分布，顺序切分和随机切分在统计上等价；
+- 边界**按文档对齐**（切在 `</s>` 上），不会出现「同一篇文档一半在训练集、一半在验证集」的泄漏；
+- 验证时用**固定的**随机窗口（种子只跟 rank 有关，不跟 step 有关），所以每次 eval 看的是同一批样本，不同 step 之间可以直接比较。
+
+想改比例就调 `--tokens` 和 `--val-tokens`；想换成随机划分需要额外一遍扫描和 30 GB 临时空间，目前没做。
+
 先小规模验证一下链路：
 
 ```bash
@@ -162,9 +178,30 @@ bash run_train.sh --resume runs/delta_net_0.4b/ckpt_0005000.pt
 ```
 runs/delta_net_0.4b/
 ├── ckpt_0000500.pt      # model + muon + adamw + step + config
-├── log.jsonl            # 每 log_every 步：loss / lr / tok/s
+├── log.jsonl            # 每 log_every 步：loss / lr / tok/s；每 eval_every 步多一行 val_loss
 └── train_config.json    # 本次运行的完整参数快照
 ```
+
+`log.jsonl` 里训练行和验证行是分开的，验证行长这样：
+
+```json
+{"step": 1000, "val_loss": 2.7341}
+```
+
+想画曲线直接：
+
+```bash
+python -c "
+import json
+rows=[json.loads(l) for l in open('runs/delta_net_0.4b/log.jsonl')]
+tr=[(r['step'],r['loss']) for r in rows if 'loss' in r]
+va=[(r['step'],r['val_loss']) for r in rows if 'val_loss' in r]
+print('train', tr[-1] if tr else None, '| val', va[-1] if va else None)
+"
+```
+
+验证 loss 是 **token 加权**的，并且多卡时会做 all-reduce，所以是全局 8 卡上的平均值。
+关掉验证用 `--eval-every 0`，调频率用 `--eval-every 250`。
 
 每个 checkpoint 里除了权重还有 `model_config`，之后评测时直接：
 

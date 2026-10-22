@@ -55,3 +55,5 @@ training:
   log_every: 10
   save_every: 500            # 每 500 步存一次（≈2.6 亿 tokens）
   keep_last: 3               # 只保留最近 3 个 checkpoint
+  eval_every: 1000           # 每 1000 步在 val.bin 上算一次 loss（0 = 关闭）
+  eval_batches: 20           # 每次验证的 batch 数（每卡 20×32×2048 ≈ 1.3M tokens）

@@ -190,25 +190,43 @@ def main(argv=None):
     next_report = args.progress_every
     t0 = time.time()
 
+    train_done = False
     try:
         for arr in results:
             docs += 1
             pos = 0
-            while pos < len(arr):
-                if n_train < args.tokens:
-                    take = min(len(arr) - pos, args.tokens - n_train)
-                    train_f.write(arr[pos:pos + take].tobytes())
-                    n_train += take
-                    pos += take
-                elif n_val < args.val_tokens:
-                    take = min(len(arr) - pos, args.val_tokens - n_val)
-                    val_f.write(arr[pos:pos + take].tobytes())
-                    n_val += take
-                    pos += take
-                else:
-                    break
 
-            if n_train >= args.tokens and n_val >= args.val_tokens:
+            if not train_done:
+                # Document boundaries are exactly the EOS positions, so the train
+                # file can be cut on a whole-document edge.  Cutting anywhere else
+                # would leave one document half in train and half in val.
+                ends = np.flatnonzero(arr == EOS_ID) + 1
+                if len(ends) == 0:
+                    pos = len(arr)  # no complete document in this batch
+                else:
+                    budget = args.tokens - n_train
+                    # number of complete documents that still fit
+                    k = int(np.searchsorted(ends, budget, side="right"))
+                    if k == 0:
+                        if n_train == 0:
+                            k = 1  # always keep at least one document in train
+                        else:
+                            train_done = True
+                    if k > 0:
+                        cut = int(ends[k - 1])
+                        train_f.write(arr[:cut].tobytes())
+                        n_train += cut
+                        pos = cut
+                        if k < len(ends) or n_train >= args.tokens:
+                            train_done = True
+
+            while pos < len(arr) and n_val < args.val_tokens:
+                take = min(len(arr) - pos, args.val_tokens - n_val)
+                val_f.write(arr[pos:pos + take].tobytes())
+                n_val += take
+                pos += take
+
+            if train_done and n_val >= args.val_tokens:
                 break
             if args.max_docs is not None and docs >= args.max_docs:
                 break
@@ -232,6 +250,7 @@ def main(argv=None):
         docs=int(docs),
         dtype="uint16",
         eos_id=EOS_ID,
+        split="document-boundary",  # train = 前 N 个完整文档，val 从下一个文档开始
         tokenizer=args.tokenizer,
         created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
@@ -241,9 +260,15 @@ def main(argv=None):
     print(f"[done] train.bin {n_train:,} tokens ({n_train*2/1e9:.1f} GB), "
           f"val.bin {n_val:,} tokens -> {args.out}", flush=True)
 
-    if n_train < args.tokens:
-        print(f"[warn] only {n_train:,} tokens written (< {args.tokens:,}); "
-              "the source was exhausted.", flush=True)
+    if not train_done and n_train < args.tokens:
+        print(f"[warn] source exhausted: only {n_train:,} train tokens "
+              f"(< {args.tokens:,}).", flush=True)
+    if n_val < args.val_tokens:
+        print(f"[warn] source exhausted: only {n_val:,} val tokens "
+              f"(< {args.val_tokens:,}).", flush=True)
+    if n_train < args.tokens and train_done:
+        print(f"[info] train stopped on a document boundary, "
+              f"{args.tokens - n_train:,} tokens short of the target.", flush=True)
 
 
 if __name__ == "__main__":

@@ -64,6 +64,8 @@ DEFAULTS = dict(
     log_every=10,
     save_every=500,
     keep_last=3,
+    eval_every=1000,
+    eval_batches=20,
 )
 
 
@@ -96,6 +98,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="override the number of steps (debugging)")
     p.add_argument("--save-every", type=int, default=None)
     p.add_argument("--log-every", type=int, default=None)
+    p.add_argument("--eval-every", type=int, default=None,
+                   help="run validation every N steps (0 disables)")
+    p.add_argument("--eval-batches", type=int, default=None,
+                   help="validation batches per rank")
     p.add_argument("--micro-batch-size", type=int, default=None)
     p.add_argument("--global-batch-tokens", type=int, default=None)
     p.add_argument("--seq-len", type=int, default=None)
@@ -113,7 +119,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     cfg = load_config(args.config)
 
     # CLI overrides
-    for name in ("save_every", "log_every", "micro_batch_size", "global_batch_tokens",
+    for name in ("save_every", "log_every", "eval_every", "eval_batches",
+                 "micro_batch_size", "global_batch_tokens",
                  "seq_len", "lr_hidden", "lr_embed", "lr_head", "seed"):
         val = getattr(args, name)
         if val is not None:
@@ -192,6 +199,47 @@ class TokenStore:
         for k, s in enumerate(starts):
             out[k] = self.tokens[s:s + seq_len + 1]
         return torch.from_numpy(out)
+
+
+# ---------------------------------------------------------------------------
+# validation
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def evaluate(model, val, micro: int, seq_len: int, n_batches: int,
+             device, rank: int, seed: int) -> float:
+    """Token-weighted validation loss over ``n_batches`` fixed windows.
+
+    The windows are drawn with a rank-only RNG (not the step RNG), so every
+    evaluation sees the *same* validation batches -- that is what makes the
+    numbers comparable across steps and across restarts.
+    """
+    was_training = model.training
+    model.eval()
+
+    rng = np.random.default_rng((seed * 7_000_003 + rank) % (2**63 - 1))
+    total = torch.zeros((), device=device, dtype=torch.float64)
+    count = torch.zeros((), device=device, dtype=torch.float64)
+
+    for _ in range(n_batches):
+        starts = rng.integers(0, len(val) - seq_len - 1, size=micro)
+        batch = np.stack([val[s:s + seq_len + 1] for s in starts]).astype(np.int64)
+        batch = torch.from_numpy(batch).to(device)
+        x, y = batch[:, :-1], batch[:, 1:]
+
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            out = model(input_ids=x, labels=y)
+
+        n_tok = float(x.numel())
+        total += out.loss.double() * n_tok
+        count += n_tok
+
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(total, op=dist.ReduceOp.SUM)
+        dist.all_reduce(count, op=dist.ReduceOp.SUM)
+
+    model.train(was_training)
+    return float(total / count.clamp(min=1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -401,12 +449,23 @@ def main(argv=None):
     # ---- data / resume ----------------------------------------------------
     if args.smoke_test:
         store = None
+        val = None
         if main_proc:
             print("[smoke] using random tokens; data dir not required", flush=True)
     else:
         store = TokenStore(args.data_dir)
         if main_proc:
             print(f"[data] {len(store)} tokens from {store.path}", flush=True)
+
+        val_path = os.path.join(args.data_dir, "val.bin")
+        if os.path.exists(val_path) and os.path.getsize(val_path) > 0:
+            val = np.memmap(val_path, dtype=np.uint16, mode="r")
+            if main_proc:
+                print(f"[data] {len(val)} held-out tokens from {val_path}", flush=True)
+        else:
+            val = None
+            if main_proc:
+                print("[data] val.bin missing/empty -> validation disabled", flush=True)
 
     start_step = 0
     ckpt_path = None
@@ -509,6 +568,16 @@ def main(argv=None):
             log_file.flush()
             last_log_time, last_log_tokens = now, tokens_done
 
+        if val is not None and cfg["eval_every"] > 0 \
+                and completed_step % cfg["eval_every"] == 0:
+            val_loss = evaluate(model, val, micro, seq_len, cfg["eval_batches"],
+                                device, rank, cfg["seed"])
+            if main_proc:
+                print(f"[eval {completed_step}] val_loss {val_loss:.4f}", flush=True)
+                log_file.write(json.dumps(dict(step=completed_step, val_loss=val_loss),
+                                          ensure_ascii=False) + "\n")
+                log_file.flush()
+
         if completed_step % cfg["save_every"] == 0 and completed_step > start_step:
             if world_size > 1:
                 dist.barrier()
@@ -519,6 +588,19 @@ def main(argv=None):
                 print(f"[ckpt] saved {path}", flush=True)
             if world_size > 1:
                 dist.barrier()
+
+    # final validation: covers early stop (SIGTERM) and a last step that does
+    # not land on an eval boundary
+    if val is not None and cfg["eval_every"] > 0 \
+            and completed_step > start_step \
+            and completed_step % cfg["eval_every"] != 0:
+        val_loss = evaluate(model, val, micro, seq_len, cfg["eval_batches"],
+                            device, rank, cfg["seed"])
+        if main_proc:
+            print(f"[eval {completed_step}] val_loss {val_loss:.4f} (final)", flush=True)
+            log_file.write(json.dumps(dict(step=completed_step, val_loss=val_loss),
+                                      ensure_ascii=False) + "\n")
+            log_file.flush()
 
     # final checkpoint (also reached on SIGTERM, and when already finished)
     if main_proc:
