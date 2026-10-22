@@ -104,7 +104,7 @@ HF_ENDPOINT=https://hf-mirror.com python prepare_data.py \
 ```
 
 产物：`data/fineweb_20b/train.bin`（20B tokens ≈ 40 GB）、`val.bin`、`meta.json`。
-32 核大约 300–600k tokens/s，20B 大概 10–20 分钟。
+32 个进程大约 3–6M tokens/s，20B 大概 1–2 小时（同时要写出 40 GB）。
 
 先小规模验证一下链路：
 
