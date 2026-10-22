@@ -134,7 +134,15 @@ def setup_distributed():
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+        # device_id tells NCCL which GPU this rank owns, so it stops guessing
+        # from the global rank ("can cause a hang if rank to GPU mapping is
+        # heterogeneous" on multi-node).
+        dist.init_process_group(
+            backend="nccl",
+            rank=rank,
+            world_size=world_size,
+            device_id=torch.device(f"cuda:{local_rank}"),
+        )
         return rank, world_size, local_rank
     return 0, 1, 0
 
