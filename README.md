@@ -86,6 +86,12 @@ bash setup_env.sh              # 建 slai_train 环境并自检 import fla / Del
 conda activate slai_train
 ```
 
+版本是有硬约束的：**torch ≥ 2.9**（带 triton 3.5）配 **fla ≥ 0.5.2**（要 triton ≥ 3.3）。
+torch 2.4 只带 triton 3.0，`import fla` 会直接报
+`Autotuner.__init__() got an unexpected keyword argument 'do_bench'`。
+`setup_env.sh` 默认已经改成 `torch==2.9.1 + cu130`，换 CUDA 版本用
+`PYTORCH_CUDA=12.8 bash setup_env.sh`。
+
 ### 2. 数据准备（一次性）
 
 训练脚本读的是**预 tokenize 好的扁平 uint16 文件**（`train.bin`），这样重启时
@@ -200,5 +206,7 @@ model.load_state_dict(ckpt["model"])
 `SLURM_NODEID` / `SLURM_NNODES` 配好了。DDP 全参数复制，0.4B 在 80GB 卡上没问题。
 
 **Q: fla 版本？**
-`>=0.4.1`。`requirements.txt` 里没有钉死，因为 fla 迭代很快；如果 `DeltaNet`
-的 `__init__` 参数变了，`module/modeling.py::_build_token_mixer` 里是唯一需要改的地方。
+`>=0.5.2`，且必须配 torch ≥ 2.9（triton ≥ 3.3）。集群上实测可用的组合是
+`torch 2.9.1+cu130 + flash-linear-attention 0.5.2`（`DeltaNet.__init__` 的 16 个参数
+与 `GatedMLP(hidden_size, hidden_ratio)` 都已核对过）。如果以后 fla 改了构造函数，
+`module/modeling.py::_build_token_mixer` 是唯一需要改的地方。

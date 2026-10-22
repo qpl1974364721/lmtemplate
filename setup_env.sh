@@ -17,8 +17,11 @@ ENV_NAME="${ENV_NAME:-slai_train}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
 # 不要用 CUDA_VERSION 这个名字：很多集群/容器把它设成完整版本号 (12.4.1.003)，
 # ${CUDA_VERSION//./} 会得到错误的 cu1241003。
-PYTORCH_CUDA="${PYTORCH_CUDA:-12.4}"
-TORCH_VERSION="${TORCH_VERSION:-2.4.0}"
+PYTORCH_CUDA="${PYTORCH_CUDA:-13.0}"
+# fla >= 0.5 需要 triton >= 3.3，而 triton 是跟着 torch 走的：
+#   torch 2.4 -> triton 3.0  (太老，import fla 会报 Autotuner "do_bench")
+#   torch 2.9 -> triton 3.5  (可用)
+TORCH_VERSION="${TORCH_VERSION:-2.9.1}"
 CUDA_TAG="cu${PYTORCH_CUDA//./}"
 
 PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"

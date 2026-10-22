@@ -6,7 +6,9 @@
 # =============================================================================
 
 # --- 深度学习基础 ---
-torch>=2.4            # 需要 torch.nn.RMSNorm (2.4+) 与 torch.autocast
+# torch 需 >= 2.9：它带 triton 3.5；torch 2.4 只带 triton 3.0，import fla 会直接崩
+# （TypeError: Autotuner.__init__() got an unexpected keyword argument 'do_bench'）
+torch>=2.9
 transformers>=4.46
 einops
 numpy
@@ -15,8 +17,8 @@ pyyaml
 
 # --- DeltaNet 内核 ---
 # fla = flash-linear-attention，提供 fla.layers.delta_net.DeltaNet（chunked
-# delta rule，论文作者实现）与 fla.modules.mlp.GatedMLP。需要 triton。
-flash-linear-attention>=0.4.1
+# delta rule，论文作者实现）与 fla.modules.mlp.GatedMLP。需要 triton>=3.3。
+flash-linear-attention>=0.5.2
 
 # --- 数据准备 (prepare_data.py) ---
 datasets>=2.20
