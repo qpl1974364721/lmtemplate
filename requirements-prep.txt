@@ -1,0 +1,15 @@
+# =============================================================================
+# 数据预处理环境 (prepare_data.py)
+#
+# 只做 tokenize，不碰模型：不需要 torch / fla / triton / GPU。
+# 适合放在登录节点、开发机、或者任何只想把语料转成 train.bin 的机器上。
+#
+#   conda create -y -n slai_prep python=3.11
+#   conda activate slai_prep
+#   pip install -r requirements-prep.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# =============================================================================
+
+datasets>=2.20
+transformers>=4.46
+numpy
+huggingface_hub

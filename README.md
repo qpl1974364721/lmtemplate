@@ -93,6 +93,20 @@ torch 2.4 只带 triton 3.0，`import fla` 会直接报
 `setup_env.sh` 默认已经改成 `torch==2.9.1 + cu130`，换 CUDA 版本用
 `PYTORCH_CUDA=12.8 bash setup_env.sh`。
 
+**如果这台机器只做数据预处理**（不训练、无 GPU），不用装 torch/fla，
+用轻量依赖就够（约 1.5 GB 而不是 6 GB）：
+
+```bash
+conda create -y -n slai_prep python=3.11
+conda activate slai_prep
+pip install -r requirements-prep.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+python prepare_data.py --source ... --out ...
+```
+
+`requirements-prep.txt` 只有 `datasets / transformers / numpy / huggingface_hub`。
+预处理产物（`train.bin`）是纯二进制，**与 torch 版本、CUDA 版本、GPU 型号都无关**，
+在哪台机器上生成都一样，可以直接拷到训练集群。
+
 ### 2. 数据准备（一次性）
 
 训练脚本读的是**预 tokenize 好的扁平 uint16 文件**（`train.bin`），这样重启时
