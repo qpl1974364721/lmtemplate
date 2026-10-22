@@ -235,8 +235,9 @@ model.load_state_dict(ckpt["model"])
 `--grad-checkpoint`（慢 ~20%）。
 
 **Q: 吞吐大概多少？**
-8×H100 上 0.4B 模型、seq 2048 一般能到 30–60 万 tokens/s，20B tokens 约
-9–18 小时。第一个 `log` 里的 `tok/s` 才是准的（前几步有编译/预热开销）。
+H100 上单卡实测（micro=8、accum=32、seq 2048）约 **10.4 万 tok/s**，8 卡 DDP 大约
+**80 万 tok/s**，20B tokens 约 **7 小时**。第一个 `log` 里的 `tok/s` 才是准的
+（第 1 步有 triton 编译和预热，会显示成 6 万左右）。
 
 **Q: 能不能多机？**
 `run_train.slurm` 里 `--nodes` 改大即可，`torchrun` 已经按
