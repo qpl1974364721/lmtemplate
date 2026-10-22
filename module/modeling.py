@@ -1,419 +1,235 @@
-from dataclasses import dataclass
-from typing import Optional, Tuple
+"""0.4B DeltaNet language model (lmtemplate-style backbone).
+
+Architecture references
+-----------------------
+* DeltaNet: "Parallelizing Linear Transformers with the Delta Rule over
+  Sequence Length" (Yang et al., arXiv:2406.06484).  The chunked delta-rule
+  kernel itself is reused from ``fla`` (``fla.layers.delta_net.DeltaNet``),
+  which is the paper authors' own implementation, so this file only wires the
+  kernel into a full network.
+* Backbone: lmtemplate's pre-norm residual block
+  (RMSNorm -> token mixer -> residual -> RMSNorm -> GatedMLP -> residual),
+  with untied input embedding and LM head.
+
+Unlike the eval branches of this repo, this module has no softmax-attention
+fallback, no KV-cache / generation code and no fused cross-entropy: it is the
+training-time definition of the model only.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import asdict, dataclass, fields
+from typing import Optional
 
 import torch
 import torch.nn as nn
-from fla.modules.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
-from fla.modules.mlp import GatedMLP
-from jaxtyping import Float, Int
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
-from .attention import Attention as AttentionBlock
-from .cache_utils import Cache
+from fla.modules.mlp import GatedMLP
 
 
 @dataclass
 class ModelConfig:
+    """Model hyper-parameters (0.4B, 24 layers, hidden 1024, 8 heads)."""
+
     vocab_size: int = 32000
     n_layers: int = 24
     dim: int = 1024
-    rotary_dim: int = 128
     n_heads: int = 8
     expand_ratio: int = 4
-    rotary_base: int = 10000
-    key_expand: int = 2
-    # Input embeddings and lm_head are intentionally NOT tied. lm-eval's HFLM
-    # calls `model.tie_weights()` on any nn.Module; the default behaviour would
-    # otherwise overwrite lm_head.weight with emb.weight (shapes match).
+    norm_eps: float = 1e-5
+
+    # Input embedding and lm_head are intentionally NOT tied (same choice as
+    # the other branches of this repo / the checkpoints already on the cluster).
     tie_word_embeddings: bool = False
-    # Which attention/recurrence core each Layer uses:
-    #   "attention" -> the template's FlashAttention block (module/attention.py)
-    #   "gla"       -> fla.layers.simple_gla.SimpleGatedLinearAttention
-    #   "gdn"       -> fla.layers.gated_deltanet.GatedDeltaNet
-    #   "kda"       -> fla.layers.kda.KimiDeltaAttention
-    #   "gka"       -> Gated KalmaNet (implementation not present in this repo)
-    attn_impl: str = "attention"
+
+    # Token mixer. Only "delta_net" is implemented in this branch.
+    attn_impl: str = "delta_net"
+
+    # --- DeltaNet hyper-parameters (fla.layers.delta_net.DeltaNet) ----------
+    dn_mode: str = "chunk"          # "chunk" (parallel, for training) | "fused_recurrent"
+    dn_expand_k: float = 1.0
+    dn_expand_v: float = 1.0
+    dn_use_gate: bool = False       # output gate (the paper's gated variant)
+    dn_use_short_conv: bool = True  # short conv on q/k/v, important for quality
+    dn_conv_size: int = 4
+    dn_allow_neg_eigval: bool = False
+    dn_qk_activation: str = "silu"
+    dn_qk_norm: str = "l2"
+
+    @property
+    def head_dim(self) -> int:
+        return self.dim // self.n_heads
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ModelConfig":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
+
 
 @dataclass
 class ModelOutput:
     logits: Optional[torch.Tensor] = None
-    past_key_values: Optional[dict] = None
     loss: Optional[torch.Tensor] = None
-    aux_loss: Optional[torch.Tensor] = None
-
-class RotaryEmbedding(nn.Module):
-    
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        self.rotary_dim = config.rotary_dim
-        self.rotary_base = config.rotary_base
-
-        assert self.rotary_dim % 2 == 0
-
-        inv_freq = 1.0 / (self.rotary_base ** (torch.arange(0, self.rotary_dim, 2).float() / self.rotary_dim))
-        self.register_buffer('inv_freq', inv_freq, persistent=False)
 
 
-    def forward(
-        self, 
-        hidden_state: Float[torch.Tensor, 'b t d'],     # RoPE actually does not use hidden states. Only to obtain the device
-        position_ids: Int[torch.Tensor, 'b t']
-    ) -> Tuple[
-        Float[torch.Tensor, 'b t rd'], 
-        Float[torch.Tensor, 'b t rd']
-    ]:
-        self.inv_freq = self.inv_freq.to(position_ids)
-        freqs = torch.einsum('b t, d->b t d', position_ids, self.inv_freq)
-        freqs = torch.cat([freqs, freqs], dim=-1)
-        cos = freqs.cos()
-        sin = freqs.sin()
-        return cos.to(hidden_state), sin.to(hidden_state)
-
-def _build_attention(config: "ModelConfig", layer_idx: int) -> nn.Module:
-    """Instantiate the attention/recurrence core selected by ``config.attn_impl``."""
-    impl = config.attn_impl
-    head_dim = config.dim // config.n_heads
-    if impl == "attention":
-        return AttentionBlock(
-            layer_idx=layer_idx,
-            dim=config.dim,
-            n_heads=config.n_heads,
-            rotary_emb_dim=config.rotary_dim,
+def _build_token_mixer(config: ModelConfig, layer_idx: int) -> nn.Module:
+    """Instantiate the token mixer described by ``config.attn_impl``."""
+    if config.attn_impl != "delta_net":
+        raise ValueError(
+            f"Unknown attn_impl: {config.attn_impl!r}. This branch only ships "
+            "'delta_net'."
         )
-    if impl == "gla":
-        from fla.layers.simple_gla import SimpleGatedLinearAttention
-        return SimpleGatedLinearAttention(
-            hidden_size=config.dim,
-            expand_k=1,
-            expand_v=1,
-            num_heads=config.n_heads,
-            layer_idx=layer_idx,
-        )
-    if impl == "gdn":
-        from fla.layers.gated_deltanet import GatedDeltaNet
-        return GatedDeltaNet(
-            hidden_size=config.dim,
-            expand_v=1,
-            head_dim=head_dim,
-            num_heads=config.n_heads,
-            layer_idx=layer_idx,
-        )
-    if impl == "kda":
-        from fla.layers.kda import KimiDeltaAttention
-        return KimiDeltaAttention(
-            hidden_size=config.dim,
-            expand_v=1,
-            head_dim=head_dim,
-            num_heads=config.n_heads,
-            layer_idx=layer_idx,
-        )
-    if impl == "gka":
-        # Gated KalmaNet lives in Undermyth's flash-linear-attention fork
-        # (branch `fix/mesa-cg`), not in upstream fla.
-        from fla.layers.gka import GatedKalmaNet
-        return GatedKalmaNet(
-            hidden_size=config.dim,
-            head_dim=config.dim // config.n_heads,
-            num_q_heads=config.n_heads,
-            layer_idx=layer_idx,
-            ridge_strength=0.01,
-        )
-    raise ValueError(f"Unknown attn_impl: {impl!r}")
+
+    # Imported lazily so that importing this module does not require triton/fla
+    # kernels to be available (e.g. for parameter counting or config checks).
+    from fla.layers.delta_net import DeltaNet
+
+    return DeltaNet(
+        mode=config.dn_mode,
+        hidden_size=config.dim,
+        expand_k=config.dn_expand_k,
+        expand_v=config.dn_expand_v,
+        num_heads=config.n_heads,
+        use_beta=True,
+        use_gate=config.dn_use_gate,
+        use_short_conv=config.dn_use_short_conv,
+        conv_size=config.dn_conv_size,
+        conv_bias=False,
+        allow_neg_eigval=config.dn_allow_neg_eigval,
+        layer_idx=layer_idx,
+        qk_activation=config.dn_qk_activation,
+        qk_norm=config.dn_qk_norm,
+        norm_eps=config.norm_eps,
+    )
 
 
 class Layer(nn.Module):
+    """Pre-norm residual block: mixer + gated MLP."""
 
     def __init__(self, layer_idx: int, config: ModelConfig):
         super().__init__()
         self.layer_idx = layer_idx
-        self.dim = config.dim
-        self.n_heads = config.n_heads
-        self.head_dim = config.dim // config.n_heads
-        self.rotary_dim = config.rotary_dim
-
-        self.input_norm = nn.RMSNorm(self.dim)
-        self.post_norm = nn.RMSNorm(self.dim)
-
-        self.attn = _build_attention(config, self.layer_idx)
+        self.input_norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
+        self.post_norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
+        self.mixer = _build_token_mixer(config, layer_idx)
         self.mlp = GatedMLP(hidden_size=config.dim, hidden_ratio=config.expand_ratio)
 
-    def forward(
-        self, 
-        hidden_states: torch.Tensor, 
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[Int[torch.Tensor, 'b t']] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: bool = False,
-    ):
-        x = self.input_norm(hidden_states)
-        attn_output = self.attn(
-            x, 
-            position_embeddings=position_embeddings,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values, 
-            use_cache=use_cache
-        )
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # DeltaNet ignores attention masks for packed (unpadded) sequences, so
+        # we never pass one during training.
+        mixer_out = self.mixer(hidden_states, attention_mask=None, use_cache=False)[0]
+        hidden_states = hidden_states + mixer_out
 
-        aux_loss = None
-        if len(attn_output) == 3:
-            x, _, past_key_values = attn_output
-        else:
-            x, _, past_key_values, aux_loss = attn_output
+        hidden_states = hidden_states + self.mlp(self.post_norm(hidden_states))
+        return hidden_states
 
-        hidden_states = hidden_states + x   # mark attn
 
-        x = self.post_norm(hidden_states)
-        x = self.mlp(x)
-        hidden_states = hidden_states + x   # mark mlp
-
-        return hidden_states, past_key_values, aux_loss
-        
 class LanguageModel(nn.Module):
-
     def __init__(self, config: ModelConfig):
         super().__init__()
-        assert config.n_layers % 2 == 0
         self.config = config
-        self.n_layers = config.n_layers
-
-        self.rotary_emb = RotaryEmbedding(config)
         self.emb = nn.Embedding(config.vocab_size, config.dim)
-        self.layers = nn.ModuleList([
-            Layer(i, config) for i in range(self.n_layers)
-        ])
-        self.norm = nn.RMSNorm(config.dim)
+        self.layers = nn.ModuleList(
+            [Layer(i, config) for i in range(config.n_layers)]
+        )
+        self.norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
 
     def forward(
-        self, 
-        input_ids: Int[torch.Tensor, 'b t'], 
-        position_ids: Optional[Int[torch.Tensor, 'b t']] = None,      # decided by generate(). when decoding, will contain only decoded part
-        attention_mask: Optional[Int[torch.Tensor, 'b t']] = None,    # decided by generate(). when decoding, will contain both prefill and generated part
-        use_cache: bool = False, 
-        past_key_values: Optional[Cache] = None,
-        use_gradient_checkpoint: bool = False
-    ):
-
-        if use_cache and past_key_values is None:
-            past_key_values = Cache()
-
+        self,
+        input_ids: torch.Tensor,
+        use_gradient_checkpoint: bool = False,
+    ) -> torch.Tensor:
         hidden_states = self.emb(input_ids)
-       
-        if position_ids is None:
-            # past_seen_tokens = layer_cache.get_sequence_length()   # [NOTE] not really past tokens. used only for training to decide position ids
-            position_ids = torch.arange(input_ids.shape[1]).unsqueeze(0).expand_as(input_ids)    # maximum length in the batch
-        position_ids = position_ids.to(hidden_states.device)
 
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        total_aux_loss = None
         for layer in self.layers:
-            if use_gradient_checkpoint:
-                hidden_states, past_key_values, aux_loss = checkpoint(
-                    layer,
-                    hidden_states,
-                    attention_mask=attention_mask, 
-                    position_embeddings=position_embeddings,
-                    past_key_values=past_key_values, 
-                    use_cache=use_cache, 
-                    use_reentrant=False
-                )
+            if use_gradient_checkpoint and self.training:
+                hidden_states = checkpoint(layer, hidden_states, use_reentrant=False)
             else:
-                hidden_states, past_key_values, aux_loss = layer(
-                    hidden_states, 
-                    attention_mask=attention_mask, 
-                    position_embeddings=position_embeddings,
-                    past_key_values=past_key_values, 
-                    use_cache=use_cache, 
-                )
-            if aux_loss is not None:
-                total_aux_loss = total_aux_loss + aux_loss if total_aux_loss is not None else aux_loss
-            
-        hidden_states = self.norm(hidden_states)
-        # return ModelOutput(last_hidden_state=hidden_states, past_key_values=past_key_values)
-        return hidden_states, past_key_values, total_aux_loss
+                hidden_states = layer(hidden_states)
+
+        return self.norm(hidden_states)
+
+
+def chunked_cross_entropy(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    ignore_index: int = -100,
+    chunk_size: int = 2048,
+) -> torch.Tensor:
+    """Cross-entropy without materialising the full ``[B*T, vocab]`` logits.
+
+    ``labels`` are already shifted (``labels[:, t] == input_ids[:, t + 1]``).
+    The vocabulary is 32k, so for a 0.5M-token batch the full logits tensor
+    would be tens of GB; slicing over the flattened batch/time axis keeps the
+    peak at ``chunk_size * vocab`` floats.
+    """
+    hidden = hidden_states.reshape(-1, hidden_states.size(-1))
+    target = labels.reshape(-1)
+
+    total = hidden.new_zeros((), dtype=torch.float32)
+    count = torch.zeros((), dtype=torch.float32, device=hidden.device)
+    for start in range(0, hidden.size(0), chunk_size):
+        h = hidden[start:start + chunk_size]
+        t = target[start:start + chunk_size]
+        logits = F.linear(h, weight).float()
+        total = total + F.cross_entropy(
+            logits, t, ignore_index=ignore_index, reduction="sum"
+        )
+        count = count + (t != ignore_index).sum()
+
+    return total / count.clamp(min=1.0)
+
 
 class ModelForCausalLM(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
         self.model = LanguageModel(config)
-        self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
-        self.criteria = FusedLinearCrossEntropyLoss()
 
+    # -- helpers used by eval / lm-eval harness wrappers ---------------------
     def tie_weights(self) -> None:
-        """No-op override.
-
-        lm-eval's HFLM unconditionally calls ``model.tie_weights()`` on any
-        ``nn.Module`` it is handed. The default PyTorch/transformers behaviour
-        ties the input embedding with the output ``lm_head`` when their shapes
-        match, which is *not* how this model was trained (the head is a
-        separate linear layer). Keeping this as a no-op preserves the two
-        independent weight matrices.
-        """
+        """No-op: embedding and LM head are independent matrices."""
         return
 
     def get_input_embeddings(self):
         return self.model.emb
-    
+
     def get_output_embeddings(self):
         return self.lm_head
 
     def get_output_norm(self):
         return self.model.norm
 
-    def get_decoder(self):
-        return self.model.layers
+    def num_parameters(self, non_embedding: bool = False) -> int:
+        n = sum(p.numel() for p in self.parameters())
+        if non_embedding:
+            n -= self.model.emb.weight.numel() + self.lm_head.weight.numel()
+        return n
 
     def forward(
-        self, 
-        input_ids: Int[torch.Tensor, 'b t'], 
-        position_ids: Optional[Int[torch.Tensor, 'b t']] = None,      # decided by generate(). when decoding, will contain only decoded part
-        attention_mask: Optional[Int[torch.Tensor, 'b t']] = None,    # decided by generate(). when decoding, will contain both prefill and generated part
-        label: Optional[Int[torch.Tensor, 'b t']] = None,             # already shifted labels
-        use_cache: bool = False, 
-        past_key_values: Optional[Cache] = None,
-        use_gradient_checkpoint: bool = False
-    ):
-        outputs = self.model(
-            input_ids, 
-            position_ids=position_ids,
-            attention_mask=attention_mask, 
-            use_cache=use_cache, 
-            past_key_values=past_key_values,
-            use_gradient_checkpoint=use_gradient_checkpoint
+        self,
+        input_ids: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+        use_gradient_checkpoint: bool = False,
+    ) -> ModelOutput:
+        hidden_states = self.model(
+            input_ids, use_gradient_checkpoint=use_gradient_checkpoint
         )
-        hidden_states = outputs[0]
-        past_key_values = outputs[1]
-        aux_loss = outputs[2]
-        
+
+        loss = None
+        if labels is not None:
+            loss = chunked_cross_entropy(hidden_states, self.lm_head.weight, labels)
+
         logits = None
         if not self.training:
             logits = self.lm_head(hidden_states)
-            
-        loss = None
-        if label is not None:
-            # label = torch.cat((label[..., 1:], torch.full_like(label[:, :1], self.criterion.ignore_index)), dim=1)
-            loss = self.criteria(hidden_states, label, self.lm_head.weight, self.lm_head.bias)
-            
-        return ModelOutput(
-            logits=logits,
-            past_key_values=past_key_values,
-            loss=loss,
-            aux_loss=aux_loss
-        )
-    
-    def generate(
-        self,
-        input_ids: Int[torch.Tensor, 'b t'],
-        attention_mask: Optional[Int[torch.Tensor, 'b t']] = None,
-        max_length: Optional[int] = None,
-        max_new_tokens: Optional[int] = None,
-        use_cache: bool = True,
-        past_key_values: Optional[Cache] = None,
-        temperature: float = 1.0,
-        top_k: int = 50,
-        top_p: float = 1.0,
-        do_sample: bool = False,
-        eos_token_id: int = 2,
-        **kwargs
-    ):
-        # batch_size=1、无 padding，mask 全 1 无用；置 None 让 fla 层跳过 mask 处理，
-        # 避免 fla simple_gla 里 v.mul_ 对 conv 输出 view 做 inplace 的报错。
-        attention_mask = None
 
-        # 推理阶段关闭 autograd，避免 64k 上下文下保留全部中间激活导致显存暴涨
-        with torch.no_grad():
-            # Determine stopping condition
-            if max_new_tokens is None and max_length is None:
-                max_new_tokens = 100
-
-            if max_new_tokens is not None:
-                target_length = input_ids.shape[1] + max_new_tokens
-            else:
-                target_length = max_length
-                max_new_tokens = max_length - input_ids.shape[1]
-
-            batch_size, seq_len = input_ids.shape
-            device = input_ids.device
-
-            # Prefill phase
-            position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1).to(device)
-            outputs = self.model(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                attention_mask=attention_mask,
-                use_cache=use_cache,
-                past_key_values=past_key_values
-            )
-            hidden_states = outputs[0]
-            past_key_values = outputs[1]
-
-            # Get logits for next token prediction
-            logits = self.lm_head(hidden_states)
-            next_token_logits = logits[:, -1, :]
-
-            # Initialize generated sequence
-            generated = input_ids
-
-            # Decode loop
-            while past_key_values.get_sequence_length() < target_length:
-                # Apply sampling logic
-                if do_sample:
-                    # Temperature
-                    if temperature != 1.0:
-                        next_token_logits = next_token_logits / temperature
-
-                    # Top-k
-                    if top_k > 0:
-                        kth_vals = torch.kthvalue(next_token_logits, logits.size(-1) - top_k + 1, dim=-1).values
-                        next_token_logits = torch.where(next_token_logits < kth_vals.unsqueeze(-1), torch.full_like(next_token_logits, float('-inf')), next_token_logits)
-
-                    # Top-p (nucleus)
-                    if top_p < 1.0:
-                        sorted_logits, indices = torch.sort(next_token_logits, descending=True)
-                        probs = torch.softmax(sorted_logits, dim=-1)
-                        cumsum = torch.cumsum(probs, dim=-1)
-                        mask = cumsum > top_p
-                        mask[:, 1:] = mask[:, :-1].clone()
-                        mask[:, 0] = False
-                        sorted_logits = sorted_logits.masked_fill(mask, float('-inf'))
-                        next_token_logits = torch.gather(sorted_logits, dim=-1, index=indices)
-
-                    # Sample
-                    probs = torch.softmax(next_token_logits, dim=-1)
-                    next_token = torch.multinomial(probs, num_samples=1)
-                else:
-                    # Greedy decoding
-                    next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
-
-                # Append to sequence
-                generated = torch.cat([generated, next_token], dim=-1)
-
-                # Check EOS
-                if (next_token == eos_token_id).all():
-                    break
-
-                # Prepare for next iteration
-                next_token_id = next_token
-                next_position_ids = torch.tensor([past_key_values.get_sequence_length()]).unsqueeze(0).expand(batch_size, -1).to(device)
-
-                # Extend attention mask (all ones since no padding in generation)
-                if attention_mask is not None:
-                    attention_mask = torch.cat([attention_mask, torch.ones(batch_size, 1, device=device, dtype=attention_mask.dtype)], dim=-1)
-
-                # Forward pass with cached states
-                outputs = self.model(
-                    input_ids=next_token_id,
-                    position_ids=next_position_ids,
-                    attention_mask=attention_mask,
-                    use_cache=use_cache,
-                    past_key_values=past_key_values
-                )
-                hidden_states = outputs[0]
-                past_key_values = outputs[1]
-
-                # Get logits
-                logits = self.lm_head(hidden_states)
-                next_token_logits = logits[:, -1, :]
-
-            return generated
+        return ModelOutput(logits=logits, loss=loss)

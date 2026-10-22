@@ -1,0 +1,57 @@
+# =============================================================================
+# 0.4B DeltaNet —— 训练配置
+#
+# 数值全部来自 D:\Users\邱培林\Desktop\delta_net.md：
+#   vocab 32000 / 24 层 / hidden 1024 / 8 头   ->  ~0.4B 参数
+#   20B tokens，seq_len 2048，0.5M tokens/batch，Muon，
+#   lr: embedding 2e-1 / hidden 2e-2 / unembedding 2e-3，
+#   linear warmup + cosine decay，warmup ratio 0.005
+#
+# 与论文 (arXiv:2406.06484) 的关系见 README「五、与论文配置的差异」。
+# =============================================================================
+
+model:
+  vocab_size: 32000
+  n_layers: 24
+  dim: 1024
+  n_heads: 8
+  expand_ratio: 4
+  norm_eps: 1.0e-5
+  tie_word_embeddings: false
+  attn_impl: delta_net
+
+  # DeltaNet 内核（fla.layers.delta_net.DeltaNet）
+  dn_mode: chunk            # 训练用 chunk 并行形式；fused_recurrent 只适合解码
+  dn_expand_k: 1.0
+  dn_expand_v: 1.0
+  dn_use_gate: false        # 论文主表用的是无输出门的 DeltaNet
+  dn_use_short_conv: true   # q/k/v 上的短卷积，关掉会明显掉点
+  dn_conv_size: 4
+  dn_allow_neg_eigval: false
+  dn_qk_activation: silu
+  dn_qk_norm: l2
+
+training:
+  tokens: 20000000000        # 总训练 token 数
+  seq_len: 2048
+  # 0.5M tokens/batch = 2^19，= 256 条 2048 序列；8 卡时每卡 32 条
+  global_batch_tokens: 524288
+  micro_batch_size: 32       # 每张卡每次 forward 的序列数
+
+  lr_embed: 0.2              # AdamW，输入 embedding
+  lr_hidden: 0.02            # Muon，所有 2-D 隐层矩阵
+  lr_head: 0.002             # AdamW，lm_head（unembedding）
+
+  warmup_ratio: 0.005
+  min_lr_ratio: 0.1          # cosine 衰减到峰值 lr 的 10%
+  weight_decay: 0.0
+
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  muon_momentum: 0.95
+  muon_ns_steps: 5
+
+  seed: 1337
+  log_every: 10
+  save_every: 500            # 每 500 步存一次（≈2.6 亿 tokens）
+  keep_last: 3               # 只保留最近 3 个 checkpoint

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 训练产物
+runs/
+logs/
+data/
+*.bin
+*.pt
+*.ckpt
+*.safetensors
+
+# 其它分支遗留的本地文件（不属于 delta_net 分支，不要提交）
+data.zip
+check_length.py
+inspect.py
+tokenize_check.py
+tok_demo.py
+_prev_chat/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/

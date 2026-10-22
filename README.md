@@ -1,183 +1,204 @@
-# LongBench 评测代码（Anti-Hebbian Attention / 线性注意力基线）
+# DeltaNet 0.4B 训练代码
 
-在 **SLAI 集群（H100）** 上，用 [lm-eval-harness](https://github.com/EleutherAI/lm-evaluation-harness) 对
-`lmtemplate` 训练的 **4 个模型族**跑 **LongBench**。
+在 **SLAI 集群（H100）** 上从零训练一个 **0.4B 参数的 DeltaNet** 语言模型：
+24 层、hidden 1024、8 头，20B tokens 的 FineWeb-Edu，Muon + AdamW。
 
-- 架构：`https://github.com/Undermyth/lmtemplate`（核心已拷到本目录 `module/`）
-- 权重：服务器上 `checkpoints/` 下的 Lightning `.ckpt` 文件（不再从 HuggingFace 下载）
+- 算法参考：[Parallelizing Linear Transformers with the Delta Rule over Sequence Length](https://arxiv.org/abs/2406.06484)（Yang et al., arXiv:2406.06484）
+- 骨架参考：`lmtemplate` 的 pre-norm residual 结构（与本仓库其它分支一致）
+- 训练配置：`D:\Users\邱培林\Desktop\delta_net.md`
 
----
-
-## 模型与权重
-
-`checkpoints/` 下每个子目录是一个模型族，里面是不同训练 token 数（5bt ~ 38bt）的 checkpoint：
-
-| 目录 | 模型 | 架构（`attn_impl`） | 来源分支 |
-|------|------|--------------------|----------|
-| `gdn-muon/` | Gated DeltaNet | `gdn` → `fla.layers.gated_deltanet.GatedDeltaNet` | `base/gdn` |
-| `gla/` | Gated Linear Attention | `gla` → `fla.layers.simple_gla.SimpleGatedLinearAttention` | `base/gla` |
-| `kda/` | Kalman Delta Attention | `kda` → `fla.layers.kda.KimiDeltaAttention` | `base/kda` |
-| `gka/` | Gated KalmaNet | `gka` → `fla.layers.gka.GatedKalmaNet` | 本地 fla（Undermyth fork `fix/mesa-cg`） |
-
-`gdn-muon` 的 `muon` 表示用 Muon 优化器训练，文件名里的 `0.4b` 表示约 0.4B 参数
-（`dim=1024, n_layers=24`）；`bt` 是训练的十亿 token 数，`step` 是训练步数。
+> 本分支（`delta_net`）**只保留训练需要的代码**。原来的 LongBench / CRIR
+> 评测脚本、`data.zip` 等都不在这个分支里。
 
 ---
 
-## 目录结构
+## 一、模型结构
+
+| 项目 | 取值 |
+|---|---|
+| tokenizer | Llama-2（`./tokenizer`，词表 32000，已本地化） |
+| 层数 | 24 |
+| hidden size | 1024 |
+| 注意力头数 | 8（head dim = 128） |
+| 每层结构 | RMSNorm → DeltaNet → 残差 → RMSNorm → GatedMLP → 残差 |
+| 参数量 | ≈0.40B（embedding 与 lm_head 不共享） |
+| token mixer | `fla.layers.delta_net.DeltaNet`（chunk 并行形式） |
+
+DeltaNet 层的细节（`ModelConfig` 里可改）：
+
+- `dn_mode: chunk`：训练用分块并行形式，序列维并行；`fused_recurrent` 只适合逐 token 解码。
+- `dn_use_short_conv: true`、`dn_conv_size: 4`：q/k/v 上各有一个短卷积，**不要关**，论文和 fla 都指出关掉会明显掉点。
+- `dn_use_gate: false`：论文主表是无输出门的 DeltaNet。想试 gated 变体把这里改 `true` 即可（会多一个 `g_proj` + 门控 RMSNorm）。
+- `dn_qk_activation: silu`、`dn_qk_norm: l2`：q/k 先做 SiLU 再 L2 归一化。
+- `dn_allow_neg_eigval: false`：对应 negative-eigenvalue 那篇的扩展，默认关。
+
+## 二、训练配置（与 delta_net.md 一致）
+
+| 项目 | 取值 |
+|---|---|
+| 数据 | `karpathy/fineweb-edu-100b-shuffle`（集群本地副本 `/home/transformers/datasets/karpathy--fineweb-edu-100b`） |
+| 训练 tokens | 20B |
+| 序列长度 | 2048 |
+| batch | 0.5M tokens/step（2^19 = 524,288，即 256 条序列） |
+| 总步数 | 38,146（20B / 524,288） |
+| 优化器 | 隐层 2-D 矩阵用 **Muon**；embedding / lm_head / 1-D 参数用 **AdamW** |
+| 学习率 | embedding **2e-1**，hidden **2e-2**（Muon），unembedding **2e-3** |
+| 调度 | linear warmup（0.5% ≈ 191 步）+ cosine 衰减到峰值的 10% |
+| 权重衰减 | 0 |
+
+学习率是怎么分的（`train.py::build_optimizers`）：
+
+| 参数 | 优化器 | lr |
+|---|---|---|
+| `emb.weight` | AdamW | 2e-1 |
+| `lm_head.weight` | AdamW | 2e-3 |
+| 所有 2-D 隐层矩阵（q/k/v/o、b_proj、MLP 的 up/gate/down） | Muon | 2e-2 |
+| RMSNorm 的 gain、短卷积 kernel（1-D/3-D） | AdamW | 2e-2 |
+
+> 注意：Muon 只接受 2-D 参数，而且学习率的量纲和 AdamW 不同（正交化后更新范数
+> 约为 √(rows/cols)），所以 2e-2 只能和 Muon 搭配；把它给 AdamW 会直接训崩。
+
+## 三、目录结构
 
 ```
 .
-├── module/                 # 架构代码（modeling.py 内含 attn_impl 开关）
-│   ├── modeling.py         # ModelConfig / ModelForCausalLM / Layer（attn 按 attn_impl 切换）
-│   ├── attention.py        # 模板自带的 FlashAttention 块（attn_impl="attention" 时用）
-│   └── cache_utils.py
-├── eval_longbench.py       # 主脚本：发现 checkpoints/ 下所有 .ckpt 并逐个跑 LongBench
-├── make_results_table.py   # 汇总脚本：把各 checkpoint 的 LongBench 总分汇成对比表/CSV
-├── tokenizer/              # 已下载到本地的 Llama-2 tokenizer（无需 HF 登录）
+├── module/
+│   └── modeling.py        # LanguageModel / Layer / ModelConfig / chunked CE
+├── muon.py                # Muon 优化器（Newton-Schulz 正交化）
+├── prepare_data.py        # 一次性把语料 tokenize 成 uint16 的 train.bin
+├── train.py               # DDP 训练主脚本（断点续跑、日志、ckpt）
+├── configs/
+│   └── delta_net_0.4b.yaml
+├── tokenizer/             # Llama-2 tokenizer（4 个文件）
 ├── requirements.txt
-├── setup_env.sh
-├── run_longbench.slurm     # Slurm 作业（H100）
-├── run_longbench.sh        # 交互式单卡直接运行
-├── run_longbench_multi.sh  # 多卡分片并行运行（NUM_GPUS=N）
+├── setup_env.sh           # 建 conda 环境 slai_train
+├── run_train.sh           # 单机多卡直接跑
+├── run_train.slurm        # Slurm 作业（8×H100，--requeue）
 └── README.md
 ```
 
-### 对架构源码的改动
+## 四、跑起来
 
-`lmtemplate` 的 4 个分支只差 `Layer` 里 attention 这一行。这里把 `module/modeling.py` 合并成一个文件，
-用 `ModelConfig.attn_impl` 选择注意力核：
-
-- `attention`（默认）= 模板自带的 FlashAttention 块；
-- `gla` / `gdn` / `kda` = 对应 fla 层；
-- `gka` = `fla.layers.gka.GatedKalmaNet`（`ridge_strength=0.01`）。
-
-另外保留了两处让新版 lm-eval 能正确接管的修复：`tie_weights()` no-op + `tie_word_embeddings=False`。
-
----
-
-## 一、环境准备
+### 1. 环境
 
 ```bash
-bash setup_env.sh                 # 建 conda 环境 slai_eval 并装依赖
-conda activate slai_eval
+bash setup_env.sh              # 建 slai_train 环境并自检 import fla / DeltaNet
+conda activate slai_train
 ```
 
-> **不需要 HF 登录**：tokenizer 已下载到本地 `./tokenizer`；LongBench 数据集是公开的，
-> 脚本里已设置 `HF_ENDPOINT=https://hf-mirror.com` 走国内镜像下载。
+### 2. 数据准备（一次性）
 
-`flash-linear-attention`（`fla`）的版本会影响 fla 层的参数名/接口，**必须与训练 checkpoint 时使用的版本兼容**。
-如遇权重 key 对不上，先对齐 fla 版本（默认装 `>=0.4.1`，可尝试 `==0.4.2`）。
-
----
-
-## 二、运行
-
-### Slurm 提交（推荐）
-
-改 `run_longbench.slurm` 里的 `--partition` / `--gres` / 环境名，然后：
+训练脚本读的是**预 tokenize 好的扁平 uint16 文件**（`train.bin`），这样重启时
+是 O(1) 定位，不用重新 tokenize 数据流。
 
 ```bash
-sbatch run_longbench.slurm
+# 集群本地数据集（推荐，不依赖网络）
+python prepare_data.py \
+  --source /home/transformers/datasets/karpathy--fineweb-edu-100b \
+  --out ./data/fineweb_20b --tokens 20000000000 --val-tokens 10000000 --workers 32
+
+# 或者走 HF 镜像直接下
+HF_ENDPOINT=https://hf-mirror.com python prepare_data.py \
+  --source karpathy/fineweb-edu-100b-shuffle \
+  --out ./data/fineweb_20b --tokens 20000000000 --workers 32
 ```
 
-### 交互式
+产物：`data/fineweb_20b/train.bin`（20B tokens ≈ 40 GB）、`val.bin`、`meta.json`。
+32 核大约 300–600k tokens/s，20B 大概 10–20 分钟。
+
+先小规模验证一下链路：
 
 ```bash
-bash run_longbench.sh
+python prepare_data.py --source some.txt --out ./data/tiny \
+  --tokens 2000000 --val-tokens 100000 --workers 0
 ```
 
-### 多卡并行（推荐，提速）
+### 3. 冒烟测试
 
 ```bash
-# 先看实例有几张卡
-nvidia-smi -L
+# 不读数据，随机 token 跑 20 步，验证模型/优化器/显存
+bash run_train.sh --smoke-test
 
-# 有几张设几（默认 4）：
-NUM_GPUS=8 bash run_longbench_multi.sh
+# 用真实数据跑 200 步
+bash run_train.sh --num-steps 200
 ```
 
-它会把 `checkpoints/` 下所有 `.ckpt` 平分到 N 张卡上并行跑，每张卡仍 `batch_size=1`。跑完自动调
-`make_results_table.py` 生成汇总表。
-
-### 直接用 `eval_longbench.py`
+### 4. 正式训练
 
 ```bash
-# 全部 checkpoint（自动发现 ./checkpoints 下所有 *.ckpt）
-python eval_longbench.py --checkpoint-dir ./checkpoints --tasks longbench
-
-# 只跑某个模型族
-python eval_longbench.py --variant gla
-
-# 只跑单个 checkpoint
-python eval_longbench.py --checkpoint ./checkpoints/gla/gla-0.4b-muon-5bt-step10240.ckpt --variant gla
-
-# 冒烟测试（每个任务只跑 5 条）
-python eval_longbench.py --limit 5
+bash run_train.sh            # 8 卡，直接前台跑
+# 或
+sbatch run_train.slurm       # Slurm 提交
 ```
 
-结果写入 `results/<目录名>/<checkpoint名>/results.json`，并在 `results/summary.json` 汇总各 checkpoint 的
-`longbench` 总分。
-
----
-
-## 三、任务选择
-
-- `longbench`：全部 21 个子任务（默认，最后给总 `score`）
-- 子组：`longbench_single` / `longbench_multi` / `longbench_summarization` / `longbench_fewshot` / `longbench_synthetic` / `longbench_code`
-- 单任务：`longbench_narrativeqa` 等；LongBench-E 用 `longbench_e`
-
----
-
-## 四、结果解读
-
-每个 checkpoint 的完整结果在 `results/<族>/<checkpoint>/results.json`，汇总在 `results/summary.json`。
-
-- 每个任务一行，`score` 是该任务主指标（F1 / ROUGE / 检索准确率 / 代码相似度等）；
-- `longbench` 组的总分是 21 个子任务分数的**平均**。
-
-**注意刻度**：lm-eval 里这些 `score` 是 **0–1 小数**，官方 LongBench / 论文里通常是 **×100 的 0–100 整数**。
-即 `score=0.45` 等价于官方口径的 `45`；引用或画图时记得 ×100。
-
-跑完后用汇总脚本把所有 checkpoint 的总分汇成对比表：
+常用参数：
 
 ```bash
-python make_results_table.py
+NGPU=4 bash run_train.sh                       # 4 卡
+bash run_train.sh --micro-batch-size 16        # 显存不够时减半（accum 自动补上）
+bash run_train.sh --resume none                # 从头开始
+bash run_train.sh --resume runs/delta_net_0.4b/ckpt_0005000.pt
 ```
 
-它会读 `results/*/*/results.json`，按「模型族 × 训练 token 数」列出每个 checkpoint 的 `longbench` 总分（已 ×100），
-并生成 `results/longbench_table.csv`，方便画 gdn/gka/gla/kda 随训练步数变化的曲线。
+## 五、断点续跑（作业重启）
 
----
+- 每 `save_every`（默认 500 步）写一次 `runs/delta_net_0.4b/ckpt_<step>.pt`，
+  先写 `.tmp` 再 `os.replace`，所以不会出现半截 checkpoint。
+- `--resume auto`（默认）会自动找 `ckpt_*.pt` 里步数最大的那个继续。
+- Slurm 里带了 `--requeue`，节点故障后作业自动重新排队；重跑同一条命令即可接上。
+- 数据顺序由 `(seed, step, rank)` 决定，不依赖保存的 RNG 状态，所以续跑看到的
+  样本序列和没中断时完全一致。
+- 收到 SIGTERM 时会先存一个 checkpoint 再退出（Slurm 抢占前有 30–60 秒宽限期）。
+- 只保留最近 `keep_last=3` 个 checkpoint，老的自动作废。
 
-## 五、断点续跑
+## 六、产物与日志
 
-每个 checkpoint 用独立的请求缓存（默认 `results/cache/<checkpoint>.sqlite`，lm-eval 会加 `_rank0.db` 后缀）。
-`run_longbench.slurm` 里已加 `#SBATCH --requeue`，节点重启/被抢占后自动重新排队，重跑自动续算。
-
-**注意**：缓存 key 只和 prompt+生成参数有关，不区分模型权重。换权重/配置/seed/任务后要 `rm -rf cache/`。
-
----
-
-## 六、`gka`（Gated KalmaNet）的 fla 依赖
-
-`gka` 用的是 `fla.layers.gka.GatedKalmaNet`，这个层**不在官方 `flash-linear-attention` 里**，
-而在 Undermyth 的 fork 的 `fix/mesa-cg` 分支：
-
-```bash
-pip install -e "git+https://github.com/Undermyth/flash-linear-attention@fix/mesa-cg#egg=flash-linear-attention"
+```
+runs/delta_net_0.4b/
+├── ckpt_0000500.pt      # model + muon + adamw + step + config
+├── log.jsonl            # 每 log_every 步：loss / lr / tok/s
+└── train_config.json    # 本次运行的完整参数快照
 ```
 
-（或直接用服务器上已经装好的、带 `fla/layers/gka.py` 的 fla 环境。）否则 `eval_longbench.py` 跑到
-`gka` 时会 `ModuleNotFoundError: fla.layers.gka`。
+每个 checkpoint 里除了权重还有 `model_config`，之后评测时直接：
 
----
+```python
+ckpt = torch.load("ckpt_0038146.pt", map_location="cpu")
+cfg = ModelConfig.from_dict(ckpt["model_config"])
+model = ModelForCausalLM(cfg)
+model.load_state_dict(ckpt["model"])
+```
 
-## 七、注意事项
+## 七、和论文配置的差异（有意为之）
 
-1. **数据集下载慢/失败**：脚本已用 `HF_ENDPOINT=https://hf-mirror.com` 走国内镜像；tokenizer 是本地 `./tokenizer`，无需 HF 登录。
-2. **权重 key 对不上**：优先怀疑 fla 版本不一致；再用 `--n-layers/--dim/...` 对齐配置。
-3. **先冒烟测试**：正式跑之前先 `--limit 5` 确认能加载、能生成。
-4. **batch-size 保持 1**：长上下文生成更稳。
+`delta_net.md` 是这次实验的准绳，所以和论文有这些不同：
 
+1. **规模**：论文主结果是 1.3B / 100B tokens；这里是 0.4B / 20B tokens。
+2. **纯 DeltaNet**：论文还试了两种混合（隔层滑窗注意力、两层全局注意力）。这里
+   24 层全是 DeltaNet，没有混 softmax 层，便于和仓库里 gla/gdn/kda 三个 0.4B
+   baseline 直接对比。
+3. **无输出门**：`use_gate=false`，对应论文主表。
+4. **无 weight decay、无梯度裁剪**：Muon 的更新已做正交化，参考实现也不裁剪。
+5. **短卷积保留**：`use_short_conv=true`，与论文一致。
 
+## 八、常见问题
+
+**Q: 报 `ImportError: libcuda.so` / triton 相关错误？**
+`fla` 的 chunk kernel 依赖 triton，必须在 GPU 节点上跑，不能在登录节点。
+
+**Q: 显存不够（OOM）？**
+减小 `--micro-batch-size`（32 → 16 → 8），`accum` 会按
+`global_seqs / (world_size * micro)` 自动补上，总 batch 不变。也可以用
+`--grad-checkpoint`（慢 ~20%）。
+
+**Q: 吞吐大概多少？**
+8×H100 上 0.4B 模型、seq 2048 一般能到 30–60 万 tokens/s，20B tokens 约
+9–18 小时。第一个 `log` 里的 `tok/s` 才是准的（前几步有编译/预热开销）。
+
+**Q: 能不能多机？**
+`run_train.slurm` 里 `--nodes` 改大即可，`torchrun` 已经按
+`SLURM_NODEID` / `SLURM_NNODES` 配好了。DDP 全参数复制，0.4B 在 80GB 卡上没问题。
+
+**Q: fla 版本？**
+`>=0.4.1`。`requirements.txt` 里没有钉死，因为 fla 迭代很快；如果 `DeltaNet`
+的 `__init__` 参数变了，`module/modeling.py::_build_token_mixer` 里是唯一需要改的地方。
