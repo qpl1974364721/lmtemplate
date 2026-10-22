@@ -18,7 +18,6 @@ training-time definition of the model only.
 
 from __future__ import annotations
 
-import math
 from dataclasses import asdict, dataclass, fields
 from typing import Optional
 
