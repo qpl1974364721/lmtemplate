@@ -240,6 +240,42 @@ model.load_state_dict(ckpt["model"])
 
 ## 八、常见问题
 
+**Q: 多卡启动卡住 10 分钟，然后报 `Watchdog caught collective operation timeout` 和
+`DDP expects same model across all ranks`？**
+这不是模型问题，是 NCCL 的 P2P 通道挂死了。某些 Blackwell 工作站（实测 RTX 6000D /
+sm_120）上会出现：日志走到 `via P2P/CUMEM` → `Connected all rings` 之后就再没有进展，
+连 1 个元素的 `all_reduce` 都完不成。关掉 P2P 改走共享内存即可：
+
+```bash
+export NCCL_P2P_DISABLE=1
+export NCCL_IB_DISABLE=1                      # 机器上有 mlx5 网卡、且可能有一块是 down 的
+export NCCL_SOCKET_IFNAME=<你 UP 的那块网卡>   # ip -br addr 里看，比如 ens5f0np0
+```
+
+最小复现/验证脚本：
+
+```python
+# /tmp/nccl_test.py
+import os, torch, torch.distributed as dist
+print(f"[{os.environ['RANK']}] start", flush=True)
+dist.init_process_group("nccl")
+print(f"[{os.environ['RANK']}] init done", flush=True)
+r = int(os.environ["RANK"]); torch.cuda.set_device(r)
+t = torch.ones(1, device=f"cuda:{r}")
+dist.all_reduce(t); torch.cuda.synchronize()
+print(f"[{r}] allreduce ok {t.item()}", flush=True)
+dist.destroy_process_group()
+```
+
+```bash
+NCCL_DEBUG=INFO NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=ens5f0np0 \
+  timeout 45 torchrun --nproc_per_node=2 /tmp/nccl_test.py > /tmp/nccl.log 2>&1
+```
+
+正常时日志里是 `via SHM/direct/direct`；异常时是 `via P2P/CUMEM` 之后卡住。
+关掉 P2P 后梯度走主机内存，0.4B 模型每步只有 ~1.5 GB，对速度影响可以忽略
+（H100/NVLink 机器上**不要**关，会白白损失带宽）。
+
 **Q: 报 `ImportError: libcuda.so` / triton 相关错误？**
 `fla` 的 chunk kernel 依赖 triton，必须在 GPU 节点上跑，不能在登录节点。
 

@@ -6,6 +6,12 @@
 #   NGPU=4 bash run_train.sh             # 4 卡
 #   bash run_train.sh --num-steps 50     # 冒烟：只跑 50 步
 #   bash run_train.sh --smoke-test       # 不读数据，随机 token 跑 20 步
+#
+# 注意: 某些 Blackwell 工作站 (实测 RTX 6000D / sm_120) 上 NCCL 的 P2P/CUMEM 会挂死,
+# 表现为卡 10 分钟后报 Watchdog timeout。启动前需要:
+#   export NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1
+#   export NCCL_SOCKET_IFNAME=<ip -br addr 里状态 UP 的那块网卡>
+# H100 / NVLink 机器上不要设, 否则白白损失带宽。
 # =============================================================================
 set -euo pipefail
 
