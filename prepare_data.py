@@ -126,7 +126,11 @@ def build_source(args):
             from datasets import load_dataset
 
             print(f"[data] {len(parquet)} parquet files under {src}", flush=True)
-            ds = load_dataset("parquet", data_dir=src, split="train", streaming=True)
+            # Pass the explicit file list instead of data_dir: data_dir makes
+            # `datasets` treat *every* file in the directory as parquet, and a
+            # stray dataset_info.md / README then blows up with
+            # "Parquet magic bytes not found in footer".
+            ds = load_dataset("parquet", data_files={"train": parquet}, split="train", streaming=True)
             return _iter_from_dataset(ds, batch_docs), f"parquet:{src}"
         if txts:
             print(f"[data] {len(txts)} text files under {src}", flush=True)
