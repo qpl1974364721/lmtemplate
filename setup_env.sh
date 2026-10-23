@@ -3,7 +3,7 @@
 # 在 SLAI 集群上创建 DeltaNet 训练环境 (conda)
 # 用法:  bash setup_env.sh   (可重复运行，已存在的环境自动跳过)
 # 可调环境变量:
-#   ENV_NAME           conda 环境名            (默认 slai_train)
+#   ENV_NAME           conda 环境名            (默认 ncrc_train)
 #   PYTHON_VERSION     Python 版本             (默认 3.11)
 #   PYTORCH_CUDA       PyTorch 的 CUDA 主次版本 (默认 12.4, 映射为 cu124)
 #   TORCH_VERSION      PyTorch 版本            (默认 2.4.0)
@@ -13,7 +13,7 @@
 # =============================================================================
 set -euo pipefail
 
-ENV_NAME="${ENV_NAME:-slai_train}"
+ENV_NAME="${ENV_NAME:-ncrc_train}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
 # 不要用 CUDA_VERSION 这个名字：很多集群/容器把它设成完整版本号 (12.4.1.003)，
 # ${CUDA_VERSION//./} 会得到错误的 cu1241003。

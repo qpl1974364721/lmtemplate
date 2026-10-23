@@ -72,7 +72,7 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 │   └── delta_net_0.4b.yaml
 ├── tokenizer/             # Llama-2 tokenizer（4 个文件）
 ├── requirements.txt
-├── setup_env.sh           # 建 conda 环境 slai_train
+├── setup_env.sh           # 建 conda 环境 ncrc_train
 ├── run_train.sh           # 单机多卡直接跑
 ├── run_train.slurm        # Slurm 作业（8×H100，--requeue）
 └── README.md
@@ -83,8 +83,8 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 ### 1. 环境
 
 ```bash
-bash setup_env.sh              # 建 slai_train 环境并自检 import fla / DeltaNet
-conda activate slai_train
+bash setup_env.sh              # 建 ncrc_train 环境并自检 import fla / DeltaNet
+conda activate ncrc_train
 ```
 
 版本是有硬约束的：**torch ≥ 2.9**（带 triton 3.5）配 **fla ≥ 0.5.2**（要 triton ≥ 3.3）。

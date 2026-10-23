@@ -31,7 +31,7 @@ CONDA_SH="${CONDA_SH:-/home/qpl/miniconda3/etc/profile.d/conda.sh}"
 if [ -f "${CONDA_SH}" ]; then
   # shellcheck source=/dev/null
   source "${CONDA_SH}"
-  conda activate "${ENV_NAME:-slai_train}"
+  conda activate "${ENV_NAME:-ncrc_train}"
 fi
 
 # ---- 训练 -------------------------------------------------------------------
