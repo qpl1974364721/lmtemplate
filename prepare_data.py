@@ -33,6 +33,7 @@ import glob
 import io
 import json
 import os
+import sys
 import time
 from multiprocessing import Pool
 
@@ -273,6 +274,15 @@ def main(argv=None):
     if n_train < args.tokens and train_done:
         print(f"[info] train stopped on a document boundary, "
               f"{args.tokens - n_train:,} tokens short of the target.", flush=True)
+
+    # All files are closed and fsynced at this point.  Exit explicitly instead
+    # of returning: with `datasets` + pyarrow + a multiprocessing.Pool, Python's
+    # interpreter teardown can abort with
+    #   "terminate called without an active exception"  (SIGABRT, core dumped)
+    # long after the work is done.  That turned a successful run into exit 134.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
