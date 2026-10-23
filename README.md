@@ -280,13 +280,15 @@ NCCL_DEBUG=INFO NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=ens5f0np
 `fla` 的 chunk kernel 依赖 triton，必须在 GPU 节点上跑，不能在登录节点。
 
 **Q: 显存不够（OOM）？**
-减小 `--micro-batch-size`（32 → 16 → 8），`accum` 会按
+先看 `micro=16` 是否够用：0.4B / seq 2048 / 24 层的激活，`micro=16` 约 40 GB，
+`micro=32` 约 80 GB（实测 83 GB 卡在 32 时会 OOM）。还不行就 8 → 4，`accum` 会按
 `global_seqs / (world_size * micro)` 自动补上，总 batch 不变。也可以用
 `--grad-checkpoint`（慢 ~20%）。
 
 **Q: 吞吐大概多少？**
 H100 上单卡实测（micro=8、accum=32、seq 2048）约 **10.4 万 tok/s**，8 卡 DDP 大约
-**80 万 tok/s**，20B tokens 约 **7 小时**。第一个 `log` 里的 `tok/s` 才是准的
+**80 万 tok/s**，20B tokens 约 **7 小时**。RTX 6000D（sm_120，P2P 关闭）上 2 卡合计
+约 **10.7 万 tok/s**，20B 约 50 小时。第一个 `log` 里的 `tok/s` 才是准的
 （第 1 步有 triton 编译和预热，会显示成 6 万左右）。
 
 **Q: 能不能多机？**

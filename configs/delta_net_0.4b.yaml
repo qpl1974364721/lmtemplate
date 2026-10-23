@@ -34,9 +34,11 @@ model:
 training:
   tokens: 20000000000        # 总训练 token 数
   seq_len: 2048
-  # 0.5M tokens/batch = 2^19，= 256 条 2048 序列；8 卡时每卡 32 条
+  # 0.5M tokens/batch = 2^19，= 256 条 2048 序列
   global_batch_tokens: 524288
-  micro_batch_size: 32       # 每张卡每次 forward 的序列数
+  # 每卡每次 forward 的序列数。实测 32 条 × 2048 需要约 80 GB 显存（83 GB 卡会 OOM），
+  # 16 条约 40 GB，80 GB 的 H100 也安全。显存更大可试 32。
+  micro_batch_size: 16
 
   lr_embed: 0.2              # AdamW，输入 embedding
   lr_hidden: 0.02            # Muon，所有 2-D 隐层矩阵
