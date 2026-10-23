@@ -120,9 +120,10 @@ class Layer(nn.Module):
         self.mlp = GatedMLP(hidden_size=config.dim, hidden_ratio=config.expand_ratio)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Pre-norm: the mixer must see the normalised residual stream.
         # DeltaNet ignores attention masks for packed (unpadded) sequences, so
         # we never pass one during training.
-        mixer_out = self.mixer(hidden_states, attention_mask=None, use_cache=False)[0]
+        mixer_out = self.mixer(self.input_norm(hidden_states), attention_mask=None, use_cache=False)[0]
         hidden_states = hidden_states + mixer_out
 
         hidden_states = hidden_states + self.mlp(self.post_norm(hidden_states))
