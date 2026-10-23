@@ -37,15 +37,15 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 | 项目 | 取值 |
 |---|---|
 | 数据 | `karpathy/fineweb-edu-100b-shuffle`（集群本地副本 `/home/transformers/datasets/karpathy--fineweb-edu-100b`） |
-| 训练 tokens | 20B |
+| 训练 tokens | 20B（`tokens`） |
 | 序列长度 | 2048 |
 | batch | 0.5M tokens/step（2^19 = 524,288，即 256 条序列） |
 | 总步数 | 38,146（20B / 524,288） |
 | 优化器 | 隐层 2-D 矩阵用 **Muon**；embedding / lm_head / 1-D 参数用 **AdamW** |
 | 学习率 | embedding **2e-1**，hidden **2e-2**（Muon），unembedding **2e-3** |
-| 调度 | linear warmup（0.5% ≈ 191 步）+ cosine 衰减到峰值的 10% |
+| 调度 | linear warmup（0.5%）+ cosine 到 10%，**衰减视界 40B**（`schedule_tokens`） |
 | 权重衰减 | 0 |
-| 验证 | 每 1000 步在 `val.bin` 上算一次 token 加权 loss（每卡 20 个 batch） |
+| 验证 | 每 1000 步在留出的 parquet 文件上算 token 加权 loss（每卡 20 个 batch） |
 
 学习率是怎么分的（`train.py::build_optimizers`）：
 
@@ -66,15 +66,16 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 ├── module/
 │   └── modeling.py        # LanguageModel / Layer / ModelConfig / chunked CE
 ├── muon.py                # Muon 优化器（Newton-Schulz 正交化）
-├── prepare_data.py        # 一次性把语料 tokenize 成 uint16 的 train.bin
-├── train.py               # DDP 训练主脚本（断点续跑、日志、ckpt）
+├── data_stream.py         # 在线 tokenize：流式读 parquet + 打包 + 断点位置
+├── train.py               # DDP 训练主脚本（断点续跑、验证、日志、ckpt）
+├── prepare_data.py        # （可选）离线预 tokenize 成 train.bin，训练不再依赖
 ├── configs/
 │   └── delta_net_0.4b.yaml
 ├── tokenizer/             # Llama-2 tokenizer（4 个文件）
 ├── requirements.txt
 ├── setup_env.sh           # 建 conda 环境 ncrc_train
 ├── run_train.sh           # 单机多卡直接跑
-├── run_train.slurm        # Slurm 作业（8×H100，--requeue）
+├── run_train.slurm        # Slurm 作业（--requeue）
 └── README.md
 ```
 
@@ -107,47 +108,33 @@ python prepare_data.py --source ... --out ...
 预处理产物（`train.bin`）是纯二进制，**与 torch 版本、CUDA 版本、GPU 型号都无关**，
 在哪台机器上生成都一样，可以直接拷到训练集群。
 
-### 2. 数据准备（一次性）
+### 2. 数据（在线 tokenize，不需要预处理）
 
-训练脚本读的是**预 tokenize 好的扁平 uint16 文件**（`train.bin`），这样重启时
-是 O(1) 定位，不用重新 tokenize 数据流。
+训练时直接流式读 parquet、用**当前配置的 tokenizer** 现 tokenize 并打包成定长序列
+（`data_stream.py`）。所以：
 
-```bash
-# 集群本地数据集（推荐，不依赖网络）
-python prepare_data.py \
-  --source /home/transformers/datasets/karpathy--fineweb-edu-100b \
-  --out ./data/fineweb_20b --tokens 20000000000 --val-tokens 10000000 --workers 32
+- **换 tokenizer 只要改 `data.tokenizer` 再重启**，不用重新处理 40 GB 语料；
+- 不占磁盘、不用等预处理；
+- 每个 rank 只读自己的文件 `files[rank::world]`，天然不重复；
+- 流的位置（第几个文件 / 第几篇文档 / 打包缓冲）会写进 checkpoint，重启时只
+  解码跳过已读文档、**不重新 tokenize**，所以续跑不会浪费算力。
 
-# 或者走 HF 镜像直接下
-HF_ENDPOINT=https://hf-mirror.com python prepare_data.py \
-  --source karpathy/fineweb-edu-100b-shuffle \
-  --out ./data/fineweb_20b --tokens 20000000000 --workers 32
+配置里只需要指到 parquet 目录：
+
+```yaml
+data:
+  source: /nas/datasets/karpathy--fineweb-edu-100b
+  tokenizer: ./tokenizer
+  val_files: 20          # 最后 20 个 parquet 文件留作验证，不参与训练
+  val_tokens: 10000000
 ```
 
-产物：`data/fineweb_20b/train.bin`（20B tokens ≈ 40 GB）、`val.bin`、`meta.json`。
-32 个进程大约 3–6M tokens/s，20B 大概 1–2 小时（同时要写出 40 GB）。
+**验证集怎么来的**：最后 `val_files` 个 parquet 文件不参与训练，启动时把它们
+里的一段（`val_tokens`）编码进内存（约 20 MB）作为验证集。因为是**按文件**留出
+的，同一篇文档不会既在训练集又在验证集。验证时用固定种子的窗口，跨 step 可比。
 
-**训练集 / 验证集怎么分**：顺序切分，不是随机切分。
-
-```
-FineWeb-Edu 流（文档级已 shuffle）
-├──────────── 前 20B tokens ────────────┤├─ 接下来 10M ─┤
-            train.bin                        val.bin
-```
-
-- 训练集 = 流的前 20B token，验证集 = 紧接着的 10M token；
-- 源数据 `fineweb-edu-100b-shuffle` 本身已经全局打乱，所以尾部与头部同分布，顺序切分和随机切分在统计上等价；
-- 边界**按文档对齐**（切在 `</s>` 上），不会出现「同一篇文档一半在训练集、一半在验证集」的泄漏；
-- 验证时用**固定的**随机窗口（种子只跟 rank 有关，不跟 step 有关），所以每次 eval 看的是同一批样本，不同 step 之间可以直接比较。
-
-想改比例就调 `--tokens` 和 `--val-tokens`；想换成随机划分需要额外一遍扫描和 30 GB 临时空间，目前没做。
-
-先小规模验证一下链路：
-
-```bash
-python prepare_data.py --source some.txt --out ./data/tiny \
-  --tokens 2000000 --val-tokens 100000 --workers 0
-```
+> `prepare_data.py` 仍然保留，如果你以后想离线预 tokenize 也能用，但训练已经
+> 不依赖它了。
 
 ### 3. 冒烟测试
 
@@ -162,18 +149,25 @@ bash run_train.sh --num-steps 200
 ### 4. 正式训练
 
 ```bash
-bash run_train.sh            # 8 卡，直接前台跑
-# 或
-sbatch run_train.slurm       # Slurm 提交
+# 2 卡（accum=8），数据直接来自 /nas 的 parquet 目录（在线 tokenize）
+NGPU=2 \
+DATA=/nas/datasets/karpathy--fineweb-edu-100b \
+OUT=/data/qpl/delta_net/runs/delta_net_0.4b \
+  bash run_train.sh
+
+# 或 Slurm
+sbatch run_train.slurm
 ```
 
 常用参数：
 
 ```bash
-NGPU=4 bash run_train.sh                       # 4 卡
-bash run_train.sh --micro-batch-size 16        # 显存不够时减半（accum 自动补上）
+NGPU=4 bash run_train.sh                       # 4 卡（accum 自动变 4）
+bash run_train.sh --micro-batch-size 8         # 显存不够时减半（accum 自动补上）
 bash run_train.sh --resume none                # 从头开始
 bash run_train.sh --resume runs/delta_net_0.4b/ckpt_0005000.pt
+bash run_train.sh --tokenizer ./tokenizer_v2   # 换 tokenizer（会打警告）
+bash run_train.sh --schedule-tokens 60000000000  # 衰减视界改成 60B
 ```
 
 ## 五、断点续跑（作业重启）
@@ -182,9 +176,12 @@ bash run_train.sh --resume runs/delta_net_0.4b/ckpt_0005000.pt
   先写 `.tmp` 再 `os.replace`，所以不会出现半截 checkpoint。
 - `--resume auto`（默认）会自动找 `ckpt_*.pt` 里步数最大的那个继续。
 - Slurm 里带了 `--requeue`，节点故障后作业自动重新排队；重跑同一条命令即可接上。
-- 数据顺序由 `(seed, step, rank)` 决定，不依赖保存的 RNG 状态，所以续跑看到的
-  样本序列和没中断时完全一致。
-- 收到 SIGTERM 时会先存一个 checkpoint 再退出（Slurm 抢占前有 30–60 秒宽限期）。
+- checkpoint 里除了权重/优化器，还存了**每个 rank 的数据流位置**（第几个文件、
+  文件内第几篇文档、打包缓冲里剩的 token）和 **tokenizer 指纹**。续跑时会跳到
+  那个文档继续读（只解码 parquet，不重新 tokenize），所以数据流和没中断时一致。
+- 如果换了 tokenizer 再续跑，会打印 `tokenizer changed (old -> new)` 警告——此时
+  数据分布变了，loss 不能和之前直接比。
+- 收到 SIGTERM/SIGINT 时会先存一个 checkpoint 再退出。
 - 只保留最近 `keep_last=3` 个 checkpoint，老的自动作废。
 
 ## 六、产物与日志
@@ -214,7 +211,7 @@ print('train', tr[-1] if tr else None, '| val', va[-1] if va else None)
 "
 ```
 
-验证 loss 是 **token 加权**的，并且多卡时会做 all-reduce，所以是全局 8 卡上的平均值。
+验证 loss 是 **token 加权**的，并且多卡时会做 all-reduce，所以是全局所有卡的平均值。
 关掉验证用 `--eval-every 0`，调频率用 `--eval-every 250`。
 
 每个 checkpoint 里除了权重还有 `model_config`，之后评测时直接：

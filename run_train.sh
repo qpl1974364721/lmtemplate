@@ -19,7 +19,8 @@ cd "$(dirname "$0")"
 
 NGPU="${NGPU:-8}"
 CONFIG="${CONFIG:-configs/delta_net_0.4b.yaml}"
-DATA="${DATA:-./data/fineweb_20b}"
+# 在线 tokenize：DATA 指向存放 parquet 的目录（不是预处理好的 bin）
+DATA="${DATA:-/nas/datasets/karpathy--fineweb-edu-100b}"
 OUT="${OUT:-./runs/delta_net_0.4b}"
 
 mkdir -p "${OUT}" logs
@@ -31,6 +32,6 @@ torchrun \
   --nproc_per_node="${NGPU}" \
   train.py \
   --config "${CONFIG}" \
-  --data-dir "${DATA}" \
+  --data-source "${DATA}" \
   --out-dir "${OUT}" \
   "$@"

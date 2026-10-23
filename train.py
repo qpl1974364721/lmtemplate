@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 """Train a 0.4B DeltaNet on FineWeb-Edu (20B tokens) with Muon + AdamW.
 
-Launch (single node, 8x H100):
+Launch (single node, 2x or 4x GPU):
 
-    torchrun --standalone --nproc_per_node=8 train.py \
+    torchrun --standalone --nproc_per_node=2 train.py \
         --config configs/delta_net_0.4b.yaml \
-        --data-dir ./data/fineweb_20b \
-        --out-dir  ./runs/delta_net_0.4b
+        --data-source /nas/datasets/karpathy--fineweb-edu-100b \
+        --out-dir     ./runs/delta_net_0.4b
 
-The script is restart-safe: every ``--save-every`` steps it writes
-``ckpt_<step>.pt`` atomically and ``--resume auto`` picks the newest one.  The
-data order is derived from ``(seed, step, rank)`` instead of a saved RNG state,
-so a resumed run sees exactly the data order the crashed run would have seen.
+Data: the parquet corpus is streamed and tokenised on the fly (see
+``data_stream.py``); there is no pre-tokenised ``train.bin`` any more, so
+switching tokenizer only needs a config change.
+
+Restart-safe: every ``--save-every`` steps it writes ``ckpt_<step>.pt``
+atomically, together with each rank's data-stream position (file / document /
+pending tokens).  ``--resume auto`` restores weights *and* stream position, so a
+resumed run fast-forwards through the parquet files it already consumed
+(decode only, no re-tokenisation) and continues exactly where it stopped.
+
+LR schedule: ``tokens`` is how long we actually train, while ``schedule_tokens``
+is the horizon the cosine decay is stretched over -- e.g. train 20B but decay as
+if 40B, which stops at ~55% of peak lr.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from data_stream import PackedStream, build_val_tokens, list_parquet_files, shard_files
 from module.modeling import ModelConfig, ModelForCausalLM
 from muon import Muon
 
@@ -47,9 +57,12 @@ DEFAULTS = dict(
     attn_impl="delta_net",
     # training
     tokens=20_000_000_000,
+    # LR schedule horizon. 训练只跑 `tokens`，但 cosine 按这个步数走完，
+    # 相当于"本来打算训 40B、现在只训到一半就停"，结束时 lr 还在中段。
+    schedule_tokens=None,          # None -> 等于 tokens
     seq_len=2048,
     global_batch_tokens=524_288,   # 2**19 == 256 sequences of 2048 tokens
-    micro_batch_size=32,           # sequences per GPU per forward
+    micro_batch_size=16,           # sequences per GPU per forward
     lr_embed=0.2,
     lr_hidden=0.02,
     lr_head=0.002,
@@ -66,6 +79,13 @@ DEFAULTS = dict(
     keep_last=3,
     eval_every=1000,
     eval_batches=20,
+    # data (on-the-fly tokenisation)
+    data_source=None,
+    tokenizer="./tokenizer",
+    val_files=20,                  # 最后 N 个 parquet 文件留作验证集
+    val_tokens=10_000_000,
+    batch_docs=256,                # 每次编码多少篇文档
+    eos_id=2,
 )
 
 
@@ -90,7 +110,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train 0.4B DeltaNet")
 
     p.add_argument("--config", type=str, default="configs/delta_net_0.4b.yaml")
-    p.add_argument("--data-dir", type=str, default="./data/fineweb_20b")
+    p.add_argument("--data-source", type=str, default=None,
+                   help="存放 .parquet 的目录（在线 tokenize 模式）")
+    p.add_argument("--data-dir", type=str, default=None,
+                   help="已废弃，等价于 --data-source")
+    p.add_argument("--tokenizer", type=str, default=None,
+                   help="tokenizer 目录或 HF id，默认 ./tokenizer")
+    p.add_argument("--val-files", type=int, default=None,
+                   help="最后 N 个 parquet 文件留作验证集")
+    p.add_argument("--val-tokens", type=int, default=None)
     p.add_argument("--out-dir", type=str, default="./runs/delta_net_0.4b")
     p.add_argument("--resume", type=str, default="auto",
                    help="'auto' | 'none' | path to a .pt checkpoint")
@@ -105,6 +133,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--micro-batch-size", type=int, default=None)
     p.add_argument("--global-batch-tokens", type=int, default=None)
     p.add_argument("--seq-len", type=int, default=None)
+    p.add_argument("--schedule-tokens", type=int, default=None,
+                   help="LR 衰减视界（可以大于实际训练的 --tokens）")
     p.add_argument("--lr-hidden", type=float, default=None)
     p.add_argument("--lr-embed", type=float, default=None)
     p.add_argument("--lr-head", type=float, default=None)
@@ -117,6 +147,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     args = p.parse_args(argv)
 
     cfg = load_config(args.config)
+
+    # --data-source wins over the deprecated --data-dir
+    if args.data_source:
+        cfg["data_source"] = args.data_source
+    elif args.data_dir:
+        cfg["data_source"] = args.data_dir
+    if args.tokenizer:
+        cfg["tokenizer"] = args.tokenizer
+    if args.val_files is not None:
+        cfg["val_files"] = args.val_files
+    if args.val_tokens is not None:
+        cfg["val_tokens"] = args.val_tokens
+    if args.schedule_tokens is not None:
+        cfg["schedule_tokens"] = args.schedule_tokens
 
     # CLI overrides
     for name in ("save_every", "log_every", "eval_every", "eval_batches",
@@ -167,38 +211,27 @@ def cleanup():
 # ---------------------------------------------------------------------------
 # data
 # ---------------------------------------------------------------------------
+# 训练数据不再来自预 tokenize 的 train.bin，而是由 data_stream.PackedStream
+# 在训练过程中流式读取 parquet、用当前 tokenizer 现场编码、打包成定长序列。
+# 这样换 tokenizer 只需要改配置重启（流的位置存在 checkpoint 里，不会重复编码）。
 
-class TokenStore:
-    """Memory-mapped uint16 token file produced by ``prepare_data.py``."""
 
-    def __init__(self, data_dir: str):
-        path = os.path.join(data_dir, "train.bin")
-        meta_path = os.path.join(data_dir, "meta.json")
-        if not os.path.exists(path):
-            raise FileNotFoundError(
-                f"{path} not found -- run prepare_data.py first "
-                "(see README '二、数据准备')."
-            )
-        self.path = path
-        self.tokens = np.memmap(path, dtype=np.uint16, mode="r")
-        self.meta = {}
-        if os.path.exists(meta_path):
-            with open(meta_path, "r", encoding="utf-8") as f:
-                self.meta = json.load(f)
+def build_tokenizer(path: str):
+    from transformers import AutoTokenizer
 
-    def __len__(self):
-        return len(self.tokens)
+    tok = AutoTokenizer.from_pretrained(path)
+    return tok
 
-    def sample(self, rng: np.random.Generator, batch: int, seq_len: int) -> torch.Tensor:
-        """Sample ``batch`` windows of ``seq_len + 1`` tokens (x and y share them)."""
-        n = len(self.tokens)
-        if n <= seq_len + 1:
-            raise ValueError(f"token file too small: {n} tokens")
-        starts = rng.integers(0, n - seq_len - 1, size=batch)
-        out = np.empty((batch, seq_len + 1), dtype=np.int64)
-        for k, s in enumerate(starts):
-            out[k] = self.tokens[s:s + seq_len + 1]
-        return torch.from_numpy(out)
+
+def tokenizer_signature(tok) -> str:
+    """Short fingerprint so we can warn when the tokenizer changed on resume."""
+    import hashlib
+
+    probe = tok("The quick brown fox jumps over the lazy dog.", add_special_tokens=False)["input_ids"]
+    h = hashlib.md5()
+    h.update(str(len(tok)).encode())
+    h.update(str(probe).encode())
+    return h.hexdigest()[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +362,8 @@ def atomic_save(obj, path: str):
     os.replace(tmp, path)
 
 
-def save_checkpoint(path, step, raw_model, muon, adamw, model_cfg, cfg):
+def save_checkpoint(path, step, raw_model, muon, adamw, model_cfg, cfg,
+                    stream_states=None, tokenizer_sig=None):
     atomic_save(
         dict(
             step=step,
@@ -339,9 +373,23 @@ def save_checkpoint(path, step, raw_model, muon, adamw, model_cfg, cfg):
             model_config=model_cfg.to_dict(),
             train_config={k: v for k, v in cfg.items()},
             tokens_seen=step * cfg["global_batch_tokens"],
+            stream_states=stream_states,
+            tokenizer_sig=tokenizer_sig,
         ),
         path,
     )
+
+
+def gather_stream_states(stream, world_size: int):
+    """Collect every rank's data-stream position so a resume can fast-forward."""
+    if stream is None:
+        return None
+    local = stream.state_dict()
+    if world_size > 1 and dist.is_available() and dist.is_initialized():
+        states = [None] * world_size
+        dist.all_gather_object(states, local)
+        return states
+    return [local]
 
 
 def find_latest_ckpt(out_dir: str):
@@ -410,7 +458,15 @@ def main(argv=None):
         total_steps = args.num_steps
     elif args.smoke_test:
         total_steps = 20
-    warmup_steps = max(1, int(round(total_steps * cfg["warmup_ratio"])))
+
+    # LR schedule horizon: may be longer than the run itself (train 20B, decay
+    # as if 40B).  None -> same as the real run.
+    schedule_tokens = cfg["schedule_tokens"] or cfg["tokens"]
+    if args.num_steps is not None or args.smoke_test:
+        schedule_steps = total_steps
+    else:
+        schedule_steps = max(total_steps, schedule_tokens // cfg["global_batch_tokens"])
+    warmup_steps = max(1, int(round(schedule_steps * cfg["warmup_ratio"])))
 
     # ---- batch geometry ---------------------------------------------------
     global_seqs = cfg["global_batch_tokens"] // seq_len
@@ -447,25 +503,38 @@ def main(argv=None):
         model = DDP(model, device_ids=[local_rank], broadcast_buffers=False)
 
     # ---- data / resume ----------------------------------------------------
+    tokenizer = None
+    tok_sig = None
+    stream = None
+    val = None
     if args.smoke_test:
-        store = None
-        val = None
         if main_proc:
-            print("[smoke] using random tokens; data dir not required", flush=True)
+            print("[smoke] using random tokens; data source not required", flush=True)
     else:
-        store = TokenStore(args.data_dir)
+        if not cfg.get("data_source"):
+            raise SystemExit("需要 --data-source（或配置里的 data.source）指向 parquet 目录")
+        tokenizer = build_tokenizer(cfg["tokenizer"])
+        tok_sig = tokenizer_signature(tokenizer)
+        files = list_parquet_files(cfg["data_source"])
+        my_files, val_files = shard_files(files, world_size, rank, cfg["val_files"])
+        stream = PackedStream(
+            my_files,
+            tokenizer,
+            seq_len=seq_len,
+            eos_id=cfg["eos_id"],
+            batch_docs=cfg["batch_docs"],
+        )
         if main_proc:
-            print(f"[data] {len(store)} tokens from {store.path}", flush=True)
+            print(f"[data] {len(files)} parquet files | rank{rank} gets {len(my_files)} | "
+                  f"val uses {len(val_files)} | tokenizer={cfg['tokenizer']} sig={tok_sig}",
+                  flush=True)
 
-        val_path = os.path.join(args.data_dir, "val.bin")
-        if os.path.exists(val_path) and os.path.getsize(val_path) > 0:
-            val = np.memmap(val_path, dtype=np.uint16, mode="r")
-            if main_proc:
-                print(f"[data] {len(val)} held-out tokens from {val_path}", flush=True)
+        if val_files and cfg["val_tokens"] > 0:
+            val = build_val_tokens(val_files, tokenizer, cfg["val_tokens"],
+                                   eos_id=cfg["eos_id"], log=print if main_proc else (lambda *a, **k: None))
         else:
-            val = None
             if main_proc:
-                print("[data] val.bin missing/empty -> validation disabled", flush=True)
+                print("[data] val_files=0 -> validation disabled", flush=True)
 
     start_step = 0
     ckpt_path = None
@@ -483,6 +552,22 @@ def main(argv=None):
         muon.load_state_dict(ckpt["muon"])
         adamw.load_state_dict(ckpt["adamw"])
         start_step = int(ckpt["step"])
+
+        if stream is not None:
+            states = ckpt.get("stream_states")
+            if states and rank < len(states):
+                stream.load_state_dict(states[rank])
+                if main_proc:
+                    print(f"[resume] data stream: {stream.position()}", flush=True)
+            else:
+                print(f"[resume] WARNING: checkpoint has no stream state for rank {rank}; "
+                      "the data stream restarts from the beginning", flush=True)
+
+        old_sig = ckpt.get("tokenizer_sig")
+        if tok_sig and old_sig and old_sig != tok_sig:
+            print(f"[resume] WARNING: tokenizer changed ({old_sig} -> {tok_sig}); "
+                  "the data stream is NOT the same as before", flush=True)
+
         if main_proc:
             print(f"[resume] step {start_step} ({start_step*cfg['global_batch_tokens']/1e9:.2f}B tokens seen)",
                   flush=True)
@@ -507,6 +592,12 @@ def main(argv=None):
               f"{cfg['global_batch_tokens']} tokens ({global_seqs} seqs) | "
               f"accum {accum} x micro {micro} x world {world_size} | "
               f"warmup {warmup_steps} | target {total_tokens_target/1e9:.2f}B tokens", flush=True)
+        if schedule_steps != total_steps:
+            print(f"[train] LR schedule horizon {schedule_steps} steps "
+                  f"({schedule_steps*cfg['global_batch_tokens']/1e9:.1f}B tokens); "
+                  f"this run stops at step {total_steps} "
+                  f"(lr will be ~{lr_multiplier(total_steps-1, schedule_steps, warmup_steps, cfg['min_lr_ratio']):.2f} "
+                  "of peak at the end)", flush=True)
 
     optimizers = [muon, adamw]
     t0 = time.time()
@@ -520,20 +611,18 @@ def main(argv=None):
         if _STOP:
             break
 
-        mult = lr_multiplier(step, total_steps, warmup_steps, cfg["min_lr_ratio"])
+        mult = lr_multiplier(step, schedule_steps, warmup_steps, cfg["min_lr_ratio"])
         apply_lr(optimizers, mult)
-
-        rng = np.random.default_rng((cfg["seed"] * 1_000_003 + step * world_size + rank) % (2**63 - 1))
 
         muon.zero_grad(set_to_none=True)
         adamw.zero_grad(set_to_none=True)
 
         step_loss = 0.0
         for _ in range(accum):
-            if store is None:
+            if stream is None:
                 batch = torch.randint(0, cfg["vocab_size"], (micro, seq_len + 1), dtype=torch.int64)
             else:
-                batch = store.sample(rng, micro, seq_len)
+                batch = stream.next_batch(micro, seq_len)
             batch = batch.to(device, non_blocking=True)
             x, y = batch[:, :-1], batch[:, 1:]
 
@@ -581,9 +670,11 @@ def main(argv=None):
         if completed_step % cfg["save_every"] == 0 and completed_step > start_step:
             if world_size > 1:
                 dist.barrier()
+            states = gather_stream_states(stream, world_size)
             if main_proc:
                 path = os.path.join(args.out_dir, f"ckpt_{completed_step:07d}.pt")
-                save_checkpoint(path, completed_step, raw_model, muon, adamw, model_cfg, cfg)
+                save_checkpoint(path, completed_step, raw_model, muon, adamw, model_cfg, cfg,
+                                stream_states=states, tokenizer_sig=tok_sig)
                 prune_checkpoints(args.out_dir, cfg["keep_last"])
                 print(f"[ckpt] saved {path}", flush=True)
             if world_size > 1:
@@ -603,9 +694,13 @@ def main(argv=None):
             log_file.flush()
 
     # final checkpoint (also reached on SIGTERM, and when already finished)
+    if world_size > 1:
+        dist.barrier()
+    states = gather_stream_states(stream, world_size)
     if main_proc:
         path = os.path.join(args.out_dir, f"ckpt_{completed_step:07d}.pt")
-        save_checkpoint(path, completed_step, raw_model, muon, adamw, model_cfg, cfg)
+        save_checkpoint(path, completed_step, raw_model, muon, adamw, model_cfg, cfg,
+                        stream_states=states, tokenizer_sig=tok_sig)
         prune_checkpoints(args.out_dir, cfg["keep_last"])
         print(f"[done] saved {path} after {completed_step} steps "
               f"({completed_step*cfg['global_batch_tokens']/1e9:.2f}B tokens)", flush=True)

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # =============================================================================
 # Slurm 作业：单机 8 卡训练 0.4B DeltaNet（20B tokens）
 #
@@ -37,7 +37,7 @@ fi
 # ---- 训练 -------------------------------------------------------------------
 NGPU="${NGPU:-8}"
 CONFIG="${CONFIG:-configs/delta_net_0.4b.yaml}"
-DATA="${DATA:-./data/fineweb_20b}"
+DATA="${DATA:-/nas/datasets/karpathy--fineweb-edu-100b}"
 OUT="${OUT:-./runs/delta_net_0.4b}"
 
 MASTER_ADDR="${MASTER_ADDR:-$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)}"
@@ -53,6 +53,6 @@ torchrun \
   --master_port="${MASTER_PORT}" \
   train.py \
   --config "${CONFIG}" \
-  --data-dir "${DATA}" \
+  --data-source "${DATA}" \
   --out-dir "${OUT}" \
   --resume auto

@@ -32,7 +32,10 @@ model:
   dn_qk_norm: l2
 
 training:
-  tokens: 20000000000        # 总训练 token 数
+  tokens: 20000000000        # 实际训练 token 数
+  # 只训 20B，但余弦衰减按 40B 走完：跑到第 19073 步（20B）就停，
+  # 此时 lr 仍是峰值的约 55%，相当于"原计划训 40B、提前一半收工"。
+  schedule_tokens: 40000000000
   seq_len: 2048
   # 0.5M tokens/batch = 2^19，= 256 条 2048 序列
   global_batch_tokens: 524288
@@ -44,7 +47,7 @@ training:
   lr_hidden: 0.02            # Muon，所有 2-D 隐层矩阵
   lr_head: 0.002             # AdamW，lm_head（unembedding）
 
-  warmup_ratio: 0.005
+  warmup_ratio: 0.005        # 相对于 schedule_tokens 的步数
   min_lr_ratio: 0.1          # cosine 衰减到峰值 lr 的 10%
   weight_decay: 0.0
 
@@ -57,5 +60,14 @@ training:
   log_every: 10
   save_every: 500            # 每 500 步存一次（≈2.6 亿 tokens）
   keep_last: 3               # 只保留最近 3 个 checkpoint
-  eval_every: 1000           # 每 1000 步在 val.bin 上算一次 loss（0 = 关闭）
-  eval_batches: 20           # 每次验证的 batch 数（每卡 20×32×2048 ≈ 1.3M tokens）
+  eval_every: 1000           # 每 1000 步在验证集上算一次 loss（0 = 关闭）
+  eval_batches: 20           # 每次验证的 batch 数
+
+# 训练时在线 tokenize（不再需要预先 prepare_data.py 生成 train.bin）
+data:
+  source: /nas/datasets/karpathy--fineweb-edu-100b   # 存放 .parquet 的目录
+  tokenizer: ./tokenizer                             # 换 tokenizer 只改这里
+  val_files: 20            # 最后 20 个 parquet 文件留作验证集（不参与训练）
+  val_tokens: 10000000     # 启动时把这么多 token 编码进内存作为验证集
+  batch_docs: 256          # 每次编码多少篇文档
+  eos_id: 2

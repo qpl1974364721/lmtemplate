@@ -20,6 +20,9 @@ pyyaml
 # delta rule，论文作者实现）与 fla.modules.mlp.GatedMLP。需要 triton>=3.3。
 flash-linear-attention>=0.5.2
 
-# --- 数据准备 (prepare_data.py) ---
+# --- 数据 ---
+# 训练时在线 tokenize：data_stream.py 直接用 pyarrow 读 parquet
+# （datasets 只在可选的 prepare_data.py / HF 下载路径里用到）
+pyarrow
 datasets>=2.20
 huggingface_hub
