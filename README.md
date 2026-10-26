@@ -303,7 +303,8 @@ H100 上单卡实测（micro=8、accum=32、seq 2048）约 **10.4 万 tok/s**，
 `eval_quick.py` 用 lm-eval 的 `HFLM` 直接跑训练产出的 checkpoint（不需要转 HF 格式）。
 
 ```bash
-pip install "lm-eval>=0.4.9"          # 评测依赖，训练环境里默认没装
+# 评测依赖（训练环境里默认没装；accelerate 是 HFLM 的硬依赖）
+pip install "lm-eval>=0.4.9" accelerate -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 快速验证（2 个任务 × 500 条，约 10 分钟）
 python eval_quick.py \
