@@ -149,6 +149,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--grad-checkpoint", action="store_true")
     p.add_argument("--smoke-test", action="store_true",
                    help="run a few steps on random tokens and exit (no data needed)")
+    p.add_argument("--wandb-project", type=str, default=None,
+                   help="enable Weights & Biases logging to this project (rank 0 only)")
+    p.add_argument("--wandb-run-name", type=str, default=None,
+                   help="wandb run name (default: basename of --out-dir)")
+    p.add_argument("--wandb-mode", type=str, default=None,
+                   choices=["online", "offline", "disabled"],
+                   help="wandb mode; default follows WANDB_MODE (offline works without internet)")
     p.add_argument("--seed", type=int, default=None)
 
     args = p.parse_args(argv)
@@ -601,6 +608,28 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
 
+    # ---- optional Weights & Biases logging (rank 0 only) -------------------
+    wandb_run = None
+    if args.wandb_project and main_proc:
+        try:
+            import wandb
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name or os.path.basename(os.path.abspath(args.out_dir)),
+                config={**{k: v for k, v in cfg.items() if not isinstance(v, dict)},
+                        "model_config": model_cfg.to_dict(),
+                        "world_size": world_size,
+                        "accum": accum},
+                dir=args.out_dir,          # offline runs are written next to the ckpt
+                mode=args.wandb_mode,      # None -> follow WANDB_MODE env
+                resume="allow",
+            )
+            print(f"[wandb] {wandb_run.name} | mode={wandb_run.settings.mode} | dir={args.out_dir}",
+                  flush=True)
+        except Exception as exc:          # noqa: BLE001 - never kill training for logging
+            print(f"[wandb] disabled ({exc})", flush=True)
+            wandb_run = None
+
     total_tokens_target = total_steps * cfg["global_batch_tokens"]
     if main_proc:
         print(f"[train] steps {total_steps} | seq {seq_len} | global batch "
@@ -670,6 +699,15 @@ def main(argv=None):
                                            tokens=tokens_done, tok_per_s=tok_s,
                                            elapsed_s=elapsed), ensure_ascii=False) + "\n")
             log_file.flush()
+            if wandb_run is not None:
+                try:
+                    wandb_run.log({"train/loss": step_loss, "train/lr": lr_now,
+                                   "train/tok_per_s": tok_s,
+                                   "train/tokens_B": tokens_done / 1e9,
+                                   "train/elapsed_h": elapsed / 3600},
+                                  step=completed_step)
+                except Exception:  # noqa: BLE001
+                    pass
             last_log_time, last_log_tokens = now, tokens_done
 
         if val is not None and cfg["eval_every"] > 0 \
@@ -681,6 +719,11 @@ def main(argv=None):
                 log_file.write(json.dumps(dict(step=completed_step, val_loss=val_loss),
                                           ensure_ascii=False) + "\n")
                 log_file.flush()
+                if wandb_run is not None:
+                    try:
+                        wandb_run.log({"val/loss": val_loss}, step=completed_step)
+                    except Exception:  # noqa: BLE001
+                        pass
 
         if completed_step % cfg["save_every"] == 0 and completed_step > start_step:
             if world_size > 1:
@@ -707,6 +750,11 @@ def main(argv=None):
             log_file.write(json.dumps(dict(step=completed_step, val_loss=val_loss),
                                       ensure_ascii=False) + "\n")
             log_file.flush()
+            if wandb_run is not None:
+                try:
+                    wandb_run.log({"val/loss": val_loss}, step=completed_step)
+                except Exception:  # noqa: BLE001
+                    pass
 
     # final checkpoint (also reached on SIGTERM, and when already finished)
     if world_size > 1:
@@ -720,6 +768,12 @@ def main(argv=None):
         print(f"[done] saved {path} after {completed_step} steps "
               f"({completed_step*cfg['global_batch_tokens']/1e9:.2f}B tokens)", flush=True)
         log_file.close()
+
+    if wandb_run is not None:
+        try:
+            wandb_run.finish()
+        except Exception:  # noqa: BLE001
+            pass
 
     cleanup()
 

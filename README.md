@@ -363,3 +363,46 @@ BoolQ 56.80、SciQ 75.30；FDA 8.53、SWDE 27.09、SQuAD 28.32、TQA 31.20、DRO
 - 输出在 `<output-dir>/<ckpt名>.json`，控制台按论文列顺序打印表格和两个分组平均。
 
 
+
+## 十、监控训练（Weights & Biases）
+
+默认关闭，不影响训练；加上 `--wandb-project` 才启用，且只有 rank 0 上报。
+
+```bash
+pip install wandb
+wandb login                      # 有外网时；内网机器用下面的离线模式
+```
+
+**在线**（机器能直连 wandb.ai）：
+
+```bash
+NGPU=2 OUT=/data/qpl/delta_net/runs/delta_net_0.4b_v3 \
+  bash run_train.sh --micro-batch-size 16 --wandb-project delta-net
+```
+
+**离线**（内网/无外网，跑完再同步）：
+
+```bash
+export WANDB_MODE=offline
+NGPU=2 OUT=... bash run_train.sh --micro-batch-size 16 --wandb-project delta-net
+# 结束后（在能上网的机器上）：
+#   wandb sync /data/qpl/delta_net/runs/delta_net_0.4b_v3/wandb/offline-run-*
+```
+
+离线的 run 数据写在 `--out-dir/wandb/` 下，和 checkpoint 放一起。
+
+上报的指标：
+
+| key | 含义 |
+|---|---|
+| `train/loss` | 这一步的平均训练 loss（跨 grad-accum） |
+| `train/lr` | Muon 组当前学习率 |
+| `train/tok_per_s` | 吞吐 |
+| `train/tokens_B` / `train/elapsed_h` | 进度与耗时 |
+| `val/loss` | 每 `eval_every` 步的验证 loss |
+
+另外 `wandb.init(config=...)` 会把完整训练配置（含 `model_config`、world size、accum）记下来，
+在网页的 Config 面板里能直接看到。
+
+> 没有外网又不想用 wandb：`log.jsonl` 本身就是逐行的 JSON（step/loss/lr/tokens/tok_per_s），
+> 直接 `tail -f` 或用之前的 `matplotlib` 脚本画图即可。

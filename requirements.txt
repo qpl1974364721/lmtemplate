@@ -29,3 +29,6 @@ huggingface_hub
 
 # --- 评测（可选，只有 eval_quick.py 需要，训练不需要）---
 # pip install "lm-eval>=0.4.9" accelerate evaluate
+
+# --- 监控（可选，默认关闭，加 --wandb-project 才启用）---
+# pip install wandb
