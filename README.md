@@ -347,6 +347,10 @@ BoolQ 56.80、SciQ 75.30；FDA 8.53、SWDE 27.09、SQuAD 28.32、TQA 31.20、DRO
 ### 实现细节与限制
 
 - **`--batch-size` 必须为 1**：模型是 packed-sequence 的循环结构，没有 padding mask；
+- **`--max-length` 默认 4096**，和 CRIR 分支 / 论文一致；ICR 的 SWDE/FDA 文档很长，
+  用 2048 会截掉上下文、分数明显偏低；
+- **`--add-bos` 默认关**：训练数据是 packed 序列、没有 BOS；CRIR 分支默认加 BOS，
+  想严格对齐那边的口径可以传 `--add-bos`；
 - 模型会被转成 **bf16**（fla 的 chunk 内核只支持 bf16）；
 - 上下文检索那 5 个任务是 `generate_until`（`tasks/` 下本地化），需要模型实现 `generate`；
   这里用的是**无 KV cache 的贪心解码**（每步重跑前缀、只取最后位置的 logits），

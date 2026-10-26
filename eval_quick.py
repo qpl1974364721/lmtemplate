@@ -107,11 +107,14 @@ def main(argv=None) -> int:
     p.add_argument("--limit", type=int, default=None,
                    help="每个任务只跑前 N 条（快速验证用，数值会有噪声）")
     p.add_argument("--batch-size", type=int, default=1)
-    p.add_argument("--max-length", type=int, default=2048)
+    p.add_argument("--max-length", type=int, default=4096,
+                   help="上下文预算，和 CRIR 分支/论文一致取 4096")
     p.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16"])
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--tokenizer", default="./tokenizer")
     p.add_argument("--output-dir", default="./eval_results")
+    p.add_argument("--add-bos", action="store_true",
+                   help="给上下文加 BOS；CRIR 分支默认开，我们训练没用 BOS，默认关")
     p.add_argument("--no-cache", action="store_true")
     args = p.parse_args(argv)
 
@@ -137,7 +140,7 @@ def main(argv=None) -> int:
         backend="causal",
         dtype=dtype,
         max_length=args.max_length,
-        add_bos_token=False,
+        add_bos_token=args.add_bos,
         batch_size=args.batch_size,
     )
 
