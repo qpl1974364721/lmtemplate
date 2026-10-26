@@ -1,0 +1,2 @@
+task: crir_drop
+class: !function icr_tasks.BasedDrop

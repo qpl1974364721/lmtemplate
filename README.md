@@ -314,24 +314,43 @@ conda activate ncrc_eval
 
 ```bash
 pip install "lm-eval>=0.4.9" accelerate -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-# 快速验证（2 个任务 × 500 条，约 10 分钟）
-python eval_quick.py \
-  --checkpoint /data/qpl/delta_net/runs/delta_net_0.4b_v2/ckpt_0038146.pt \
-  --tasks piqa,arc_easy --limit 500
-
-# 完整 Table-4 口径（9 个任务，约 2–3 小时）
-python eval_quick.py \
-  --checkpoint .../ckpt_0038146.pt \
-  --output-dir ./eval_results
 ```
 
-判读：论文 Table 4 的 **DN 基线**（340M / 15B tokens）平均 **47.41**；
-我们 374M / 20B tokens，**46–49 属正常**，低于 40 说明 checkpoint 或加载有问题。
+### 跑评测
 
-三个实现细节：
+```bash
+# 全部 14 个任务（9 常识 + 5 上下文检索），对齐论文 Table 4
+python eval_quick.py \
+  --checkpoint /data/qpl/delta_net/runs/delta_net_0.4b_v2/ckpt_0038146.pt \
+  --output-dir /data/qpl/delta_net/eval
+
+# 只跑常识推理（快，约 20–30 分钟）
+python eval_quick.py --checkpoint ... --suite commonsense
+
+# 只跑上下文检索（慢：每个样本要贪心生成 48 个 token）
+python eval_quick.py --checkpoint ... --suite icr
+
+# 冒烟：2 个任务 × 500 条
+python eval_quick.py --checkpoint ... --tasks piqa,arc_easy --limit 500
+```
+
+**判读基线**（论文 Table 4 的 DN 行，340M / 15B tokens）：
+
+| 组 | 论文 DN | 我们（374M / 20B）合理区间 |
+|---|---|---|
+| Commonsense Avg（8 项 acc 平均） | 47.41 | 47–53 |
+| ICR Avg（5 项 contains 平均） | 22.59 | 20–26 |
+
+单任务参考：PIQA 65.07、ARC-e 44.02、ARC-c 23.55、HellaSwag 34.08、WinoGrande 50.91、
+BoolQ 56.80、SciQ 75.30；FDA 8.53、SWDE 27.09、SQuAD 28.32、TQA 31.20、DROP 17.80。
+
+### 实现细节与限制
 
 - **`--batch-size` 必须为 1**：模型是 packed-sequence 的循环结构，没有 padding mask；
 - 模型会被转成 **bf16**（fla 的 chunk 内核只支持 bf16）；
-- 输出在 `--output-dir/<ckpt名>.json`，控制台打印一张 task/metric/value 表和 8 项平均。
+- 上下文检索那 5 个任务是 `generate_until`（`tasks/` 下本地化），需要模型实现 `generate`；
+  这里用的是**无 KV cache 的贪心解码**（每步重跑前缀、只取最后位置的 logits），
+  正确但慢，ICR 五个任务可能要几个小时；
+- 输出在 `<output-dir>/<ckpt名>.json`，控制台按论文列顺序打印表格和两个分组平均。
+
 

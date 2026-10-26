@@ -255,3 +255,62 @@ class ModelForCausalLM(nn.Module):
             logits = self.lm_head(hidden_states)
 
         return ModelOutput(logits=logits, loss=loss)
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        max_length: Optional[int] = None,
+        max_new_tokens: Optional[int] = None,
+        do_sample: bool = False,
+        temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        eos_token_id=2,
+        pad_token_id: Optional[int] = None,
+        stopping_criteria=None,
+        use_cache: bool = False,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Greedy generation, for lm-eval's ``generate_until`` tasks.
+
+        No KV cache: every step re-runs the prefix and only the *last* position
+        is projected to vocabulary (cheap), so a 48-token completion costs 48
+        forwards.  Sampling is not implemented -- ``do_sample`` must be False
+        (the CRIR ICR tasks all use greedy decoding).
+        """
+        if do_sample:
+            raise NotImplementedError(
+                "this model only implements greedy generate(); set do_sample=False"
+            )
+
+        if max_new_tokens is None:
+            if max_length is None:
+                max_new_tokens = 100
+            else:
+                max_new_tokens = max(0, int(max_length) - input_ids.shape[1])
+
+        eos = eos_token_id
+        eos_set = set(eos) if isinstance(eos, (list, tuple)) else {eos}
+        ids = input_ids
+        was_training = self.training
+        self.eval()
+
+        for _ in range(max_new_tokens):
+            hidden = self.model(ids)                    # [1, T, D]
+            logits = self.lm_head(hidden[:, -1, :])     # [1, V]
+            nxt = logits.argmax(dim=-1, keepdim=True)   # [1, 1]
+            ids = torch.cat([ids, nxt], dim=1)
+
+            if int(nxt[0, 0].item()) in eos_set:
+                break
+            if stopping_criteria is not None:
+                try:
+                    if bool(stopping_criteria(ids, None)):
+                        break
+                except TypeError:
+                    pass
+
+        if was_training:
+            self.train()
+        return ids

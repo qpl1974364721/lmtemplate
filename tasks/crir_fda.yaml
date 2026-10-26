@@ -1,0 +1,2 @@
+task: crir_fda
+class: !function icr_tasks.FDA

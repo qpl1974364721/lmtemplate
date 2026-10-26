@@ -1,32 +1,35 @@
 #!/usr/bin/env python3
-"""Evaluate a trained DeltaNet checkpoint on the CRIR commonsense tasks.
+"""Evaluate a trained DeltaNet checkpoint on the full CRIR suite (Table 4).
 
-The checkpoint written by ``train.py`` is a plain dict::
+Two groups, 14 lm-eval tasks:
 
-    {"model": state_dict, "model_config": {...}, "step": ..., "muon": ..., ...}
+  * Commonsense Reasoning (9 tasks + 2 perplexities): LAMBADA, WikiText,
+    ARC-easy, ARC-challenge, HellaSwag, PIQA, WinoGrande, BoolQ, SciQ.
+  * In-context Retrieval (5 tasks, cloze "contains" accuracy): FDA, SWDE,
+    SQuAD, TriviaQA, DROP -- vendored under ``tasks/`` because lm-eval does not
+    ship the cloze variants.
 
-so we rebuild ``ModelForCausalLM`` from ``model_config`` and hand it to
-lm-eval's ``HFLM`` (same trick as the CRIR branch: the module quacks like a HF
-causal LM -- it has ``config``, ``tie_weights()`` and a ``forward`` returning
-``.logits``).
+The checkpoint written by ``train.py`` is a plain dict with ``model`` and
+``model_config``, so the model is rebuilt here and handed to lm-eval's ``HFLM``
+(it quacks like a HF causal LM: ``config``, ``tie_weights()``, ``forward``
+returning ``.logits`` and a greedy ``generate``).
 
 Notes
 -----
-* The backbone is a packed-sequence recurrent model with no padding mask, so
-  evaluation **must** run with ``--batch-size 1``.
+* ``--batch-size`` must be 1: the backbone is a packed-sequence recurrent model
+  with no padding mask.
 * fla's chunk kernel only supports bf16, so the model is cast to bf16.
-* "Average" follows the paper's Table 4: mean of the 8 accuracy metrics
-  (LAMBADA acc, ARC-e, ARC-c, HellaSwag, PIQA, WinoGrande, BoolQ, SciQ).
-  LAMBADA / WikiText perplexities are reported but not averaged in.
+* ``generate`` is greedy and re-runs the prefix each step (no KV cache), so the
+  5 ICR tasks are slower than the multiple-choice ones.
 
 Examples
 --------
-    # quick sanity check (~10 min): 2 tasks, 500 samples each
-    python eval_quick.py --checkpoint runs/delta_net_0.4b_v2/ckpt_0038146.pt \
-        --tasks piqa,arc_easy --limit 500
-
-    # full Table-4 style run
+    # full Table-4 run (9 commonsense + 5 ICR)
     python eval_quick.py --checkpoint .../ckpt_0038146.pt
+
+    # commonsense only / quick sanity check
+    python eval_quick.py --checkpoint .../ckpt_0038146.pt --suite commonsense
+    python eval_quick.py --checkpoint .../ckpt_0038146.pt --suite commonsense --limit 500
 """
 
 from __future__ import annotations
@@ -35,37 +38,25 @@ import argparse
 import json
 import os
 import sys
+
 import torch
 
+from crir_bench import ALL_COLUMNS, COMMONSENSE, ICR, TASK_NAMES, compute_scores
 from module.modeling import ModelConfig, ModelForCausalLM
 
-DEFAULT_TASKS = ("lambada_openai,wikitext,arc_easy,arc_challenge,hellaswag,"
-                 "piqa,winogrande,boolq,sciq")
+HERE = os.path.dirname(os.path.abspath(__file__))
 
-# task -> candidate metric names, in priority order
-METRICS = {
-    "lambada_openai": ("acc,none", "acc"),
-    "wikitext": ("word_perplexity,none", "word_perplexity"),
-    "arc_easy": ("acc_norm,none", "acc_norm"),
-    "arc_challenge": ("acc_norm,none", "acc_norm"),
-    "hellaswag": ("acc_norm,none", "acc_norm"),
-    "piqa": ("acc,none", "acc"),
-    "winogrande": ("acc,none", "acc"),
-    "boolq": ("acc,none", "acc"),
-    "sciq": ("acc,none", "acc"),
+SUITES = {
+    "commonsense": [c[0] for c in COMMONSENSE],
+    "icr": [c[0] for c in ICR],
+    "all": TASK_NAMES,
 }
-
-# the 8 accuracy columns the paper averages (LAMBADA appears twice: ppl + acc)
-AVG_TASKS = ("lambada_openai", "arc_easy", "arc_challenge", "hellaswag",
-             "piqa", "winogrande", "boolq", "sciq")
 
 
 def load_checkpoint(path: str, dtype: torch.dtype, device: str) -> ModelForCausalLM:
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     if "model_config" not in ckpt or "model" not in ckpt:
-        raise SystemExit(
-            f"{path} 不是 train.py 产出的 checkpoint（缺少 model_config / model）"
-        )
+        raise SystemExit(f"{path} 不是 train.py 产出的 checkpoint（缺少 model_config / model）")
     cfg = ModelConfig.from_dict(ckpt["model_config"])
     model = ModelForCausalLM(cfg)
     model.load_state_dict(ckpt["model"], strict=True)
@@ -78,33 +69,50 @@ def load_checkpoint(path: str, dtype: torch.dtype, device: str) -> ModelForCausa
     return model
 
 
-def pick(results: dict, task: str):
-    entry = results.get(task)
-    if not entry:
-        return None
-    for name in METRICS.get(task, ()):
-        if name in entry:
-            return entry[name]
-    for k, v in entry.items():
-        if k.startswith(tuple(n.split(",")[0] for n in METRICS.get(task, ()))):
-            return v
-    return None
+def unique(seq):
+    return list(dict.fromkeys(seq))
+
+
+def print_table(scores: dict) -> None:
+    print()
+    print(f"{'column':<22}{'value':>10}")
+    print("-" * 34)
+    for task, _keys, header, kind in ALL_COLUMNS:
+        v = scores.get(header)
+        if v is None:
+            continue
+        if kind == "ppl":
+            print(f"{header:<22}{v:>10.2f}")
+        else:
+            print(f"{header:<22}{v * 100:>10.2f}")
+    print("-" * 34)
+    cs = scores.get("Commonsense Avg")
+    ic = scores.get("ICR Avg")
+    if cs is not None:
+        print(f"{'Commonsense Avg':<22}{cs * 100:>10.2f}")
+    if ic is not None:
+        print(f"{'ICR Avg':<22}{ic * 100:>10.2f}")
+    print()
+    print("[eval] 论文 Table 4 的 DN 基线（340M / 15B tokens）：")
+    print("       Commonsense Avg 47.41 | ICR Avg 22.59")
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description="Evaluate a DeltaNet checkpoint with lm-eval")
+    p = argparse.ArgumentParser(description="Full CRIR evaluation for a DeltaNet checkpoint")
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--tasks", default=DEFAULT_TASKS)
+    p.add_argument("--suite", default="all", choices=sorted(SUITES),
+                   help="commonsense / icr / all")
+    p.add_argument("--tasks", default=None,
+                   help="逗号分隔的 lm-eval 任务名，覆盖 --suite")
     p.add_argument("--limit", type=int, default=None,
                    help="每个任务只跑前 N 条（快速验证用，数值会有噪声）")
-    p.add_argument("--batch-size", type=int, default=1,
-                   help="必须为 1：模型没有 padding mask 支持")
+    p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--max-length", type=int, default=2048)
     p.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16"])
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--tokenizer", default="./tokenizer")
     p.add_argument("--output-dir", default="./eval_results")
-    p.add_argument("--no-cache", action="store_true", help="关闭 lm-eval 的请求缓存")
+    p.add_argument("--no-cache", action="store_true")
     args = p.parse_args(argv)
 
     if args.batch_size != 1:
@@ -113,6 +121,7 @@ def main(argv=None) -> int:
 
     from transformers import AutoTokenizer
     from lm_eval.models.huggingface import HFLM
+    from lm_eval.tasks import TaskManager
     import lm_eval
 
     tok = AutoTokenizer.from_pretrained(args.tokenizer)
@@ -132,9 +141,14 @@ def main(argv=None) -> int:
         batch_size=args.batch_size,
     )
 
-    tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
+    tasks = unique((args.tasks.split(",") if args.tasks else SUITES[args.suite]))
+    print(f"[eval] tasks ({len(tasks)}): {', '.join(tasks)}")
+
     os.makedirs(args.output_dir, exist_ok=True)
     cache = None if args.no_cache else os.path.join(args.output_dir, "cache", "eval.sqlite")
+
+    # vendored ICR tasks live in ./tasks
+    task_manager = TaskManager(include_path=os.path.join(HERE, "tasks"))
 
     results = lm_eval.simple_evaluate(
         model=lm,
@@ -143,6 +157,7 @@ def main(argv=None) -> int:
         batch_size=args.batch_size,
         limit=args.limit,
         use_cache=cache,
+        task_manager=task_manager,
         log_samples=False,
         apply_chat_template=False,
         confirm_run_unsafe_code=True,
@@ -158,27 +173,8 @@ def main(argv=None) -> int:
         json.dump(results, f, ensure_ascii=False, indent=2, default=str)
     print(f"[eval] raw results -> {out}")
 
-    table = results.get("results", {})
-    print()
-    print(f"{'task':<18}{'metric':<22}{'value':>10}")
-    print("-" * 50)
-    for task in tasks:
-        v = pick(table, task)
-        metric = METRICS.get(task, ("?",))[0]
-        if v is None:
-            print(f"{task:<18}{'-':<22}{'N/A':>10}")
-        else:
-            print(f"{task:<18}{metric:<22}{v:>10.3f}")
-
-    vals = [pick(table, t) for t in AVG_TASKS if t in tasks]
-    vals = [v for v in vals if v is not None]
-    if vals:
-        avg = sum(vals) / len(vals)
-        print("-" * 50)
-        print(f"{'Average acc':<18}{'(8 tasks)':<22}{avg:>10.2f}")
-        print()
-        print("[eval] 论文 Table 4 的 DN 基线（340M / 15B tokens）：Avg 47.41")
-        print("[eval] 我们 374M / 20B tokens，合理区间大致 46–49")
+    scores = compute_scores(results.get("results", {}))
+    print_table(scores)
     return 0
 
 
