@@ -62,6 +62,11 @@ class ModelConfig:
     def head_dim(self) -> int:
         return self.dim // self.n_heads
 
+    @property
+    def max_position_embeddings(self) -> int:
+        """Only for HF-style tooling (lm-eval reads it); the model has no RoPE."""
+        return 4096
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -208,6 +213,14 @@ class ModelForCausalLM(nn.Module):
     def get_output_norm(self):
         return self.model.norm
 
+    @property
+    def dtype(self) -> torch.dtype:
+        """HF-style convenience (lm-eval reads ``model.dtype``)."""
+        try:
+            return next(self.parameters()).dtype
+        except StopIteration:  # pragma: no cover
+            return torch.float32
+
     def num_parameters(self, non_embedding: bool = False) -> int:
         n = sum(p.numel() for p in self.parameters())
         if non_embedding:
@@ -218,8 +231,17 @@ class ModelForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         use_gradient_checkpoint: bool = False,
+        **kwargs,
     ) -> ModelOutput:
+        """Causal-LM forward.
+
+        ``attention_mask`` is accepted so lm-eval's ``HFLM`` can drive this
+        module (it always passes one).  The backbone itself is a packed-sequence
+        recurrent model with no padding mask support, so evaluation must use
+        ``batch_size=1``; the argument is otherwise ignored.
+        """
         hidden_states = self.model(
             input_ids, use_gradient_checkpoint=use_gradient_checkpoint
         )

@@ -26,3 +26,6 @@ flash-linear-attention>=0.5.2
 pyarrow
 datasets>=2.20
 huggingface_hub
+
+# --- 评测（可选，只有 eval_quick.py 需要，训练不需要）---
+# pip install "lm-eval>=0.4.9"

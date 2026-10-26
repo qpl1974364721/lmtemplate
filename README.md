@@ -297,3 +297,31 @@ H100 上单卡实测（micro=8、accum=32、seq 2048）约 **10.4 万 tok/s**，
 `torch 2.9.1+cu130 + flash-linear-attention 0.5.2`（`DeltaNet.__init__` 的 16 个参数
 与 `GatedMLP(hidden_size, hidden_ratio)` 都已核对过）。如果以后 fla 改了构造函数，
 `module/modeling.py::_build_token_mixer` 是唯一需要改的地方。
+
+## 九、评测（验证 checkpoint 是否正确）
+
+`eval_quick.py` 用 lm-eval 的 `HFLM` 直接跑训练产出的 checkpoint（不需要转 HF 格式）。
+
+```bash
+pip install "lm-eval>=0.4.9"          # 评测依赖，训练环境里默认没装
+
+# 快速验证（2 个任务 × 500 条，约 10 分钟）
+python eval_quick.py \
+  --checkpoint /data/qpl/delta_net/runs/delta_net_0.4b_v2/ckpt_0038146.pt \
+  --tasks piqa,arc_easy --limit 500
+
+# 完整 Table-4 口径（9 个任务，约 2–3 小时）
+python eval_quick.py \
+  --checkpoint .../ckpt_0038146.pt \
+  --output-dir ./eval_results
+```
+
+判读：论文 Table 4 的 **DN 基线**（340M / 15B tokens）平均 **47.41**；
+我们 374M / 20B tokens，**46–49 属正常**，低于 40 说明 checkpoint 或加载有问题。
+
+三个实现细节：
+
+- **`--batch-size` 必须为 1**：模型是 packed-sequence 的循环结构，没有 padding mask；
+- 模型会被转成 **bf16**（fla 的 chunk 内核只支持 bf16）；
+- 输出在 `--output-dir/<ckpt名>.json`，控制台打印一张 task/metric/value 表和 8 项平均。
+
