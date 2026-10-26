@@ -68,7 +68,14 @@ DEFAULTS = dict(
     lr_head=0.002,
     warmup_ratio=0.005,
     min_lr_ratio=0.1,
-    weight_decay=0.0,
+    # 分组权重衰减（对齐上游 muon.yaml：hidden 2D 用 Muon 的 0.1，
+    # embedding/lm_head 的 AdamW 用 0.01，1D/3D 参数不衰减）
+    weight_decay_muon=0.1,
+    weight_decay_embed=0.01,
+    weight_decay_head=0.01,
+    weight_decay_other=0.0,
+    # 参数本身用 bf16（和上游 baseline 一致）；置 fp32 可恢复全精度训练
+    param_dtype="bfloat16",
     adam_beta1=0.9,
     adam_beta2=0.95,
     muon_momentum=0.95,
@@ -307,14 +314,17 @@ def build_optimizers(model: ModelForCausalLM, cfg: dict):
             adam_other.append(p)
 
     adam_groups = [
-        dict(params=adam_embed, lr=cfg["lr_embed"], base_lr=cfg["lr_embed"], name="embed"),
-        dict(params=adam_head, lr=cfg["lr_head"], base_lr=cfg["lr_head"], name="head"),
-        dict(params=adam_other, lr=cfg["lr_hidden"], base_lr=cfg["lr_hidden"], name="other"),
+        dict(params=adam_embed, lr=cfg["lr_embed"], base_lr=cfg["lr_embed"], name="embed",
+             weight_decay=cfg["weight_decay_embed"]),
+        dict(params=adam_head, lr=cfg["lr_head"], base_lr=cfg["lr_head"], name="head",
+             weight_decay=cfg["weight_decay_head"]),
+        dict(params=adam_other, lr=cfg["lr_hidden"], base_lr=cfg["lr_hidden"], name="other",
+             weight_decay=cfg["weight_decay_other"]),
     ]
+    # weight decay is now per group (see muon.yaml upstream: 0.1 / 0.01 / 0.01 / 0.0)
     adamw = torch.optim.AdamW(
         adam_groups,
         betas=(cfg["adam_beta1"], cfg["adam_beta2"]),
-        weight_decay=cfg["weight_decay"],
         eps=1e-8,
         fused=torch.cuda.is_available(),
     )
@@ -324,7 +334,7 @@ def build_optimizers(model: ModelForCausalLM, cfg: dict):
         lr=cfg["lr_hidden"],
         momentum=cfg["muon_momentum"],
         ns_steps=cfg["muon_ns_steps"],
-        weight_decay=cfg["weight_decay"],
+        weight_decay=cfg["weight_decay_muon"],
     )
     for g in muon.param_groups:
         g["base_lr"] = cfg["lr_hidden"]
@@ -482,13 +492,16 @@ def main(argv=None):
     # ---- model ------------------------------------------------------------
     model_cfg = ModelConfig.from_dict(cfg)
     model_cfg.vocab_size = cfg["vocab_size"]
-    model = ModelForCausalLM(model_cfg).to(device)
+    # 参数量本身用 bf16（上游 baseline 的做法）：显存更省，checkpoint 更小；
+    # fla 的 chunk 内核本来就只接受 bf16，这样前后一致。
+    param_dtype = getattr(torch, cfg["param_dtype"])
+    model = ModelForCausalLM(model_cfg).to(device=device, dtype=param_dtype)
     raw_model = model  # keep an unwrapped reference for state_dict / save
 
     n_params = model.num_parameters()
     if main_proc:
         print(f"[model] parameters: {n_params/1e6:.1f}M "
-              f"(non-embedding {model.num_parameters(True)/1e6:.1f}M)", flush=True)
+              f"(non-embedding {model.num_parameters(True)/1e6:.1f}M) dtype={param_dtype}", flush=True)
         print(f"[model] config: {json.dumps(model_cfg.to_dict(), ensure_ascii=False)}", flush=True)
 
     if args.compile:
@@ -496,8 +509,10 @@ def main(argv=None):
 
     muon, adamw, opt_stats = build_optimizers(raw_model, cfg)
     if main_proc:
-        print(f"[opt] muon {opt_stats['muon']/1e6:.1f}M | embed {opt_stats['embed']/1e6:.1f}M "
-              f"| head {opt_stats['head']/1e6:.1f}M | other {opt_stats['other']/1e6:.1f}M", flush=True)
+        print(f"[opt] muon {opt_stats['muon']/1e6:.1f}M (wd={cfg['weight_decay_muon']}) | "
+              f"embed {opt_stats['embed']/1e6:.1f}M (wd={cfg['weight_decay_embed']}) | "
+              f"head {opt_stats['head']/1e6:.1f}M (wd={cfg['weight_decay_head']}) | "
+              f"other {opt_stats['other']/1e6:.1f}M (wd={cfg['weight_decay_other']})", flush=True)
 
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], broadcast_buffers=False)

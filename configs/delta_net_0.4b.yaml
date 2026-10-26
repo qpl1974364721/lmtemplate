@@ -49,7 +49,16 @@ training:
 
   warmup_ratio: 0.005        # 相对于 schedule_tokens 的步数
   min_lr_ratio: 0.1          # cosine 衰减到峰值 lr 的 10%
-  weight_decay: 0.0
+
+  # 分组权重衰减，对齐上游 muon.yaml（实测 gdn/gla/kda 三个 baseline 都是这样）
+  weight_decay_muon: 0.1     # Muon，所有 2-D 隐层矩阵
+  weight_decay_embed: 0.01   # AdamW，输入 embedding
+  weight_decay_head: 0.01    # AdamW，lm_head
+  weight_decay_other: 0.0    # AdamW，norm gain / 短卷积 kernel
+
+  # 参数本身用 bf16（上游 baseline 的做法）：显存省一半、checkpoint 从 3.1G 降到 ~1.5G。
+  # 想恢复 fp32 master weights 就改成 fp32。
+  param_dtype: bfloat16
 
   adam_beta1: 0.9
   adam_beta2: 0.95

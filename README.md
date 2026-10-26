@@ -44,20 +44,25 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 | 优化器 | 隐层 2-D 矩阵用 **Muon**；embedding / lm_head / 1-D 参数用 **AdamW** |
 | 学习率 | embedding **2e-1**，hidden **2e-2**（Muon），unembedding **2e-3** |
 | 调度 | linear warmup（0.5%）+ cosine 到 10%，**衰减视界 40B**（`schedule_tokens`） |
-| 权重衰减 | 0 |
+| 参数精度 | **bf16**（`param_dtype`，对齐上游 baseline；显存和 checkpoint 减半） |
+| 权重衰减 | **分组**：Muon 2-D 矩阵 `0.1`、embedding `0.01`、lm_head `0.01`、1D/3D `0.0` |
 | 验证 | 每 1000 步在留出的 parquet 文件上算 token 加权 loss（每卡 20 个 batch） |
 
-学习率是怎么分的（`train.py::build_optimizers`）：
+学习率 / 权重衰减是怎么分的（`train.py::build_optimizers`）：
 
-| 参数 | 优化器 | lr |
-|---|---|---|
-| `emb.weight` | AdamW | 2e-1 |
-| `lm_head.weight` | AdamW | 2e-3 |
-| 所有 2-D 隐层矩阵（q/k/v/o、b_proj、MLP 的 up/gate/down） | Muon | 2e-2 |
-| RMSNorm 的 gain、短卷积 kernel（1-D/3-D） | AdamW | 2e-2 |
+| 参数 | 优化器 | lr | weight_decay |
+|---|---|---|---|
+| `emb.weight` | AdamW | 2e-1 | 0.01 |
+| `lm_head.weight` | AdamW | 2e-3 | 0.01 |
+| 所有 2-D 隐层矩阵（q/k/v/o、b_proj、MLP 的 up/gate/down） | Muon | 2e-2 | **0.1** |
+| RMSNorm 的 gain、短卷积 kernel（1-D/3-D） | AdamW | 2e-2 | 0.0 |
 
 > 注意：Muon 只接受 2-D 参数，而且学习率的量纲和 AdamW 不同（正交化后更新范数
 > 约为 √(rows/cols)），所以 2e-2 只能和 Muon 搭配；把它给 AdamW 会直接训崩。
+>
+> 分组 wd 是对着上游 `muon.yaml` 和 gdn/gla/kda 三个 baseline 的 checkpoint
+> 里 `optimizer_states.param_groups` 实测出来的（0.1 / 0.01 / 0.01 / 0.0）。
+> 早期版本用的是全局 `weight_decay=0`，和 baseline 不可比，已废弃。
 
 ## 三、目录结构
 
