@@ -302,8 +302,17 @@ H100 上单卡实测（micro=8、accum=32、seq 2048）约 **10.4 万 tok/s**，
 
 `eval_quick.py` 用 lm-eval 的 `HFLM` 直接跑训练产出的 checkpoint（不需要转 HF 格式）。
 
+**推荐用一个独立环境**，避免 lm-eval 的依赖污染训练环境（而且训练环境跑完可以直接删）：
+
 ```bash
-# 评测依赖（训练环境里默认没装；accelerate 是 HFLM 的硬依赖）
+# 从 ncrc_train 克隆（torch/fla 版本完全一致，约 7 GB，几分钟），再装评测依赖
+bash setup_eval_env.sh
+conda activate ncrc_eval
+```
+
+不想单独建环境的话，直接在训练环境里装：
+
+```bash
 pip install "lm-eval>=0.4.9" accelerate -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 快速验证（2 个任务 × 500 条，约 10 分钟）
