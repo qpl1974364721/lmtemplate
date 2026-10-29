@@ -43,6 +43,10 @@ from data_stream import PackedStream, build_val_tokens, list_parquet_files, shar
 from module.modeling import ModelConfig, ModelForCausalLM, init_weights
 from muon import Muon
 
+# Same knob as lmtemplate/train.py:23 -- allows TF32 for any fp32 matmul that
+# escapes the bf16 autocast region.  Harmless when everything is already bf16.
+torch.set_float32_matmul_precision("medium")
+
 # ---------------------------------------------------------------------------
 # config
 # ---------------------------------------------------------------------------
