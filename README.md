@@ -47,7 +47,7 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 | 学习率 | embedding **2e-1**，hidden **2e-2**（Muon），unembedding **2e-3** |
 | 调度 | linear warmup（0.5%）+ cosine 到 10%，**衰减视界 40B**（`schedule_tokens`） |
 | 参数精度 | **fp32** 主权重 + bf16 autocast（`param_dtype`；bf16 主权重实测会让 ppl 变差，见下文） |
-| 初始化 | **normal(0, 0.02)**（`init_std`），与 fla 的 `DeltaNetForCausalLM` 一致 |
+| 初始化 | PyTorch 默认（`init_std: 0`，与 lmtemplate 一致；fla 参考实现用 0.02，可一键切换） |
 | 权重衰减 | **分组**：Muon 2-D 矩阵 `0.1`、embedding `0.01`、lm_head `0.01`、1D/3D `0.0` |
 | 验证 | 每 1000 步在留出的 parquet 文件上算 token 加权 loss（每卡 20 个 batch） |
 
@@ -422,7 +422,7 @@ NGPU=2 OUT=... bash run_train.sh --micro-batch-size 16 --wandb-project delta-net
 | MLP | `DeltaNetMLP(hidden_ratio=..., SwiGLU)` | `GatedMLP(hidden_ratio=4)` | ✅ 等价 |
 | 最终 norm | `RMSNorm(hidden_size)` 后接 `lm_head` | 相同 | ✅ |
 | 位置编码 | 无 | 无 | ✅ |
-| 初始化 | `normal_(0, 0.02)`（Linear / Embedding），bias 置零 | `init_std: 0.02` | ✅ |
+| 初始化 | `normal_(0, 0.02)`（Linear / Embedding），bias 置零 | `init_std: 0`（PyTorch 默认） | ⚠️ 跟 lmtemplate，不跟 fla |
 | `lm_head` 绑定 | 默认 `tie_word_embeddings=True` | **untied**（和上游 baseline 一致） | ⚠️ 有意不同 |
 
 开启输出门后的参数账：
@@ -436,7 +436,7 @@ NGPU=2 OUT=... bash run_train.sh --micro-batch-size 16 --wandb-project delta-net
 Muon 组张量数会从 192 变成 **216**（每层多一个 `g_proj`），可用启动日志核对：
 
 ```text
-[model] parameters: 399.6M ... dtype=torch.float32 init_std=0.02
+[model] parameters: 399.6M ... dtype=torch.float32 init_std=pytorch-default
 [opt] muon 333.7M (wd=0.1) | embed ... | head ... | other ...
 ```
 

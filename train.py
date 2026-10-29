@@ -76,8 +76,8 @@ DEFAULTS = dict(
     weight_decay_other=0.0,
     # 参数精度：fp32 是默认（v3 用 bf16 主权重后 ppl 明显变差，回滚）
     param_dtype="fp32",
-    # 初始化标准差：fla 的 DeltaNetForCausalLM 用 normal(0, 0.02)；0 = 保留 PyTorch 默认
-    init_std=0.02,
+    # 初始化标准差：lmtemplate 用 PyTorch 默认（0）；fla 参考实现用 0.02
+    init_std=0.0,
     adam_beta1=0.9,
     adam_beta2=0.95,
     muon_momentum=0.95,

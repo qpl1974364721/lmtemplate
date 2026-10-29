@@ -60,9 +60,10 @@ training:
   # 想恢复 fp32 master weights 就改成 fp32。
   param_dtype: fp32
 
-  # 初始化：fla 的 DeltaNetForCausalLM 用 normal(0, 0.02)（initializer_range），
-  # 我们原来是 PyTorch 默认（Embedding 是 N(0,1)）。设为 0 可回到 PyTorch 默认。
-  init_std: 0.02
+  # 初始化：lmtemplate 不做自定义初始化（就是 PyTorch 默认），所以这里保持 0。
+  # （fla 的 DeltaNetForCausalLM 用 normal(0, 0.02)；想对齐它就把这里改成 0.02。
+  #   两种只影响起点，不影响结构。）
+  init_std: 0.0
 
   adam_beta1: 0.9
   adam_beta2: 0.95
