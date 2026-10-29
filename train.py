@@ -82,6 +82,8 @@ DEFAULTS = dict(
     param_dtype="fp32",
     # 初始化标准差：lmtemplate 用 PyTorch 默认（0）；fla 参考实现用 0.02
     init_std=0.0,
+    # checkpoint 存储精度：bf16 把 3.2 GiB 压到 ~1.6 GiB（训练仍是 fp32 混合精度）
+    save_dtype="bf16",
     adam_beta1=0.9,
     adam_beta2=0.95,
     muon_momentum=0.95,
@@ -385,19 +387,46 @@ def atomic_save(obj, path: str):
     os.replace(tmp, path)
 
 
+def _cast_tensors(obj, dtype):
+    """Recursively cast every floating-point tensor inside nested containers."""
+    if torch.is_tensor(obj):
+        return obj.to(dtype) if obj.is_floating_point() else obj
+    if isinstance(obj, dict):
+        return {k: _cast_tensors(v, dtype) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_cast_tensors(v, dtype) for v in obj)
+    return obj
+
+
 def save_checkpoint(path, step, raw_model, muon, adamw, model_cfg, cfg,
                     stream_states=None, tokenizer_sig=None):
+    # ``save_dtype: bf16`` stores weights *and* optimizer state in bf16, which
+    # halves the file (3.2 GiB -> ~1.6 GiB).  Training itself stays fp32 (mixed
+    # precision); a resume casts everything back to fp32 on load, so the only
+    # cost is bf16 rounding of the momentum buffers.
+    save_dtype = str(cfg.get("save_dtype") or "fp32").lower()
+    cast = torch.bfloat16 if save_dtype in ("bf16", "bfloat16") else None
+
+    model_sd = raw_model.state_dict()
+    muon_sd = muon.state_dict()
+    adamw_sd = adamw.state_dict()
+    if cast is not None:
+        model_sd = _cast_tensors(model_sd, cast)
+        muon_sd = _cast_tensors(muon_sd, cast)
+        adamw_sd = _cast_tensors(adamw_sd, cast)
+
     atomic_save(
         dict(
             step=step,
-            model=raw_model.state_dict(),
-            muon=muon.state_dict(),
-            adamw=adamw.state_dict(),
+            model=model_sd,
+            muon=muon_sd,
+            adamw=adamw_sd,
             model_config=model_cfg.to_dict(),
             train_config={k: v for k, v in cfg.items()},
             tokens_seen=step * cfg["global_batch_tokens"],
             stream_states=stream_states,
             tokenizer_sig=tokenizer_sig,
+            save_dtype=save_dtype,
         ),
         path,
     )
@@ -583,9 +612,11 @@ def main(argv=None):
         if main_proc:
             print(f"[resume] loading {ckpt_path}", flush=True)
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        raw_model.load_state_dict(ckpt["model"])
-        muon.load_state_dict(ckpt["muon"])
-        adamw.load_state_dict(ckpt["adamw"])
+        # checkpoints may be stored in bf16 (save_dtype) -- cast back to the
+        # model's dtype so training continues in fp32 exactly as before
+        raw_model.load_state_dict(_cast_tensors(ckpt["model"], torch.float32))
+        muon.load_state_dict(_cast_tensors(ckpt["muon"], torch.float32))
+        adamw.load_state_dict(_cast_tensors(ckpt["adamw"], torch.float32))
         start_step = int(ckpt["step"])
 
         if stream is not None:
@@ -747,7 +778,7 @@ def main(argv=None):
                 save_checkpoint(path, completed_step, raw_model, muon, adamw, model_cfg, cfg,
                                 stream_states=states, tokenizer_sig=tok_sig)
                 prune_checkpoints(args.out_dir, cfg["keep_last"])
-                print(f"[ckpt] saved {path}", flush=True)
+                print(f"[ckpt] saved {path} ({os.path.getsize(path)/2**30:.2f} GiB)", flush=True)
             if world_size > 1:
                 dist.barrier()
 
@@ -778,8 +809,9 @@ def main(argv=None):
         save_checkpoint(path, completed_step, raw_model, muon, adamw, model_cfg, cfg,
                         stream_states=states, tokenizer_sig=tok_sig)
         prune_checkpoints(args.out_dir, cfg["keep_last"])
-        print(f"[done] saved {path} after {completed_step} steps "
-              f"({completed_step*cfg['global_batch_tokens']/1e9:.2f}B tokens)", flush=True)
+        print(f"[done] saved {path} ({os.path.getsize(path)/2**30:.2f} GiB) after "
+              f"{completed_step} steps ({completed_step*cfg['global_batch_tokens']/1e9:.2f}B tokens)",
+              flush=True)
         log_file.close()
 
     if wandb_run is not None:

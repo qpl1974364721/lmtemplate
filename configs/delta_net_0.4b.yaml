@@ -64,7 +64,9 @@ training:
   # （fla 的 DeltaNetForCausalLM 用 normal(0, 0.02)；想对齐它就把这里改成 0.02。
   #   两种只影响起点，不影响结构。）
   init_std: 0.0
-
+  # checkpoint 里权重和优化器状态存成 bf16：3.2 GiB -> ~1.6 GiB
+  # （训练本身仍是 fp32 主权重 + bf16 autocast；续跑时自动转回 fp32）
+  save_dtype: bf16
   adam_beta1: 0.9
   adam_beta2: 0.95
   muon_momentum: 0.95

@@ -48,6 +48,7 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 | 调度 | linear warmup（0.5%）+ cosine 到 10%，**衰减视界 40B**（`schedule_tokens`） |
 | 参数精度 | **fp32** 主权重 + bf16 autocast（`param_dtype`；bf16 主权重实测会让 ppl 变差，见下文） |
 | 初始化 | PyTorch 默认（`init_std: 0`，与 lmtemplate 一致；fla 参考实现用 0.02，可一键切换） |
+| checkpoint 存储 | **bf16**（`save_dtype: bf16`），399.6M 模型约 **1.6 GiB**（fp32 存则 3.2 GiB） |
 | 权重衰减 | **分组**：Muon 2-D 矩阵 `0.1`、embedding `0.01`、lm_head `0.01`、1D/3D `0.0` |
 | 验证 | 每 1000 步在留出的 parquet 文件上算 token 加权 loss（每卡 20 个 batch） |
 
