@@ -406,7 +406,8 @@ def _cast_tensors(obj, dtype):
     if torch.is_tensor(obj):
         return obj.to(dtype) if obj.is_floating_point() else obj
     if isinstance(obj, dict):
-        return {k: _cast_tensors(v, dtype) for k, v in obj.items()}
+        # keep step counters exact: bf16 cannot represent 38146 (-> 38144)
+        return {k: (v if k == "step" else _cast_tensors(v, dtype)) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return type(obj)(_cast_tensors(v, dtype) for v in obj)
     return obj
