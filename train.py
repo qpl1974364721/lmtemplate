@@ -47,6 +47,20 @@ from muon import Muon
 # escapes the bf16 autocast region.  Harmless when everything is already bf16.
 torch.set_float32_matmul_precision("medium")
 
+# torch has no attribute called "fp32"/"bf16" -- the config uses the short names.
+_DTYPE_ALIASES = {
+    "fp32": torch.float32, "float32": torch.float32,
+    "bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
+    "fp16": torch.float16, "float16": torch.float16,
+}
+
+
+def resolve_dtype(name) -> torch.dtype:
+    key = str(name).lower()
+    if key not in _DTYPE_ALIASES:
+        raise ValueError(f"unknown dtype {name!r}; expected one of {sorted(_DTYPE_ALIASES)}")
+    return _DTYPE_ALIASES[key]
+
 # ---------------------------------------------------------------------------
 # config
 # ---------------------------------------------------------------------------
@@ -404,8 +418,8 @@ def save_checkpoint(path, step, raw_model, muon, adamw, model_cfg, cfg,
     # halves the file (3.2 GiB -> ~1.6 GiB).  Training itself stays fp32 (mixed
     # precision); a resume casts everything back to fp32 on load, so the only
     # cost is bf16 rounding of the momentum buffers.
-    save_dtype = str(cfg.get("save_dtype") or "fp32").lower()
-    cast = torch.bfloat16 if save_dtype in ("bf16", "bfloat16") else None
+    save_dtype = resolve_dtype(cfg.get("save_dtype") or "fp32")
+    cast = None if save_dtype == torch.float32 else save_dtype
 
     model_sd = raw_model.state_dict()
     muon_sd = muon.state_dict()
@@ -426,7 +440,7 @@ def save_checkpoint(path, step, raw_model, muon, adamw, model_cfg, cfg,
             tokens_seen=step * cfg["global_batch_tokens"],
             stream_states=stream_states,
             tokenizer_sig=tokenizer_sig,
-            save_dtype=save_dtype,
+            save_dtype=str(save_dtype).replace("torch.", ""),
         ),
         path,
     )
@@ -534,7 +548,7 @@ def main(argv=None):
     # ---- model ------------------------------------------------------------
     model_cfg = ModelConfig.from_dict(cfg)
     model_cfg.vocab_size = cfg["vocab_size"]
-    param_dtype = getattr(torch, cfg["param_dtype"])
+    param_dtype = resolve_dtype(cfg["param_dtype"])
     model = ModelForCausalLM(model_cfg)
 
     # fla 的 DeltaNetForCausalLM 用 normal(0, 0.02) 初始化 Linear/Embedding；
