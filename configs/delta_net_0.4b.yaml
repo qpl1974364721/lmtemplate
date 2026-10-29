@@ -24,7 +24,7 @@ model:
   dn_mode: chunk            # 训练用 chunk 并行形式；fused_recurrent 只适合解码
   dn_expand_k: 1.0
   dn_expand_v: 1.0
-  dn_use_gate: false        # 论文主表用的是无输出门的 DeltaNet
+  dn_use_gate: true         # 输出门（g_proj + FusedRMSNormGated），对齐 fla 的 DeltaNetForCausalLM
   dn_use_short_conv: true   # q/k/v 上的短卷积，关掉会明显掉点
   dn_conv_size: 4
   dn_allow_neg_eigval: false
@@ -58,7 +58,11 @@ training:
 
   # 参数本身用 bf16（上游 baseline 的做法）：显存省一半、checkpoint 从 3.1G 降到 ~1.5G。
   # 想恢复 fp32 master weights 就改成 fp32。
-  param_dtype: bfloat16
+  param_dtype: fp32
+
+  # 初始化：fla 的 DeltaNetForCausalLM 用 normal(0, 0.02)（initializer_range），
+  # 我们原来是 PyTorch 默认（Embedding 是 N(0,1)）。设为 0 可回到 PyTorch 默认。
+  init_std: 0.02
 
   adam_beta1: 0.9
   adam_beta2: 0.95

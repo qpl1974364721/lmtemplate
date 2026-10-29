@@ -29,6 +29,24 @@ from torch.utils.checkpoint import checkpoint
 from fla.modules.mlp import GatedMLP
 
 
+def init_weights(module: nn.Module, std: float = 0.02) -> None:
+    """fla / HF style initialisation.
+
+    ``fla.models.delta_net.modeling_delta_net.DeltaNetPreTrainedModel`` applies
+    ``normal_(0, initializer_range=0.02)`` to every Linear and Embedding weight
+    (biases zero).  PyTorch's defaults differ a lot here -- ``nn.Embedding`` is
+    ``N(0, 1)`` and ``nn.Linear`` is Kaiming-uniform -- so a model built with
+    plain defaults is not the same starting point as fla's reference.
+    """
+    for m in module.modules():
+        if isinstance(m, nn.Linear):
+            nn.init.normal_(m.weight, mean=0.0, std=std)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Embedding):
+            nn.init.normal_(m.weight, mean=0.0, std=std)
+
+
 @dataclass
 class ModelConfig:
     """Model hyper-parameters (0.4B, 24 layers, hidden 1024, 8 heads)."""

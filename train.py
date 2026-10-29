@@ -40,7 +40,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from data_stream import PackedStream, build_val_tokens, list_parquet_files, shard_files
-from module.modeling import ModelConfig, ModelForCausalLM
+from module.modeling import ModelConfig, ModelForCausalLM, init_weights
 from muon import Muon
 
 # ---------------------------------------------------------------------------
@@ -74,8 +74,10 @@ DEFAULTS = dict(
     weight_decay_embed=0.01,
     weight_decay_head=0.01,
     weight_decay_other=0.0,
-    # 参数本身用 bf16（和上游 baseline 一致）；置 fp32 可恢复全精度训练
-    param_dtype="bfloat16",
+    # 参数精度：fp32 是默认（v3 用 bf16 主权重后 ppl 明显变差，回滚）
+    param_dtype="fp32",
+    # 初始化标准差：fla 的 DeltaNetForCausalLM 用 normal(0, 0.02)；0 = 保留 PyTorch 默认
+    init_std=0.02,
     adam_beta1=0.9,
     adam_beta2=0.95,
     muon_momentum=0.95,
@@ -499,16 +501,23 @@ def main(argv=None):
     # ---- model ------------------------------------------------------------
     model_cfg = ModelConfig.from_dict(cfg)
     model_cfg.vocab_size = cfg["vocab_size"]
-    # 参数量本身用 bf16（上游 baseline 的做法）：显存更省，checkpoint 更小；
-    # fla 的 chunk 内核本来就只接受 bf16，这样前后一致。
     param_dtype = getattr(torch, cfg["param_dtype"])
-    model = ModelForCausalLM(model_cfg).to(device=device, dtype=param_dtype)
+    model = ModelForCausalLM(model_cfg)
+
+    # fla 的 DeltaNetForCausalLM 用 normal(0, 0.02) 初始化 Linear/Embedding；
+    # PyTorch 默认（Embedding 是 N(0,1)）和它差很多，这里对齐。
+    init_std = float(cfg.get("init_std") or 0.0)
+    if init_std > 0:
+        init_weights(model, std=init_std)
+
+    model = model.to(device=device, dtype=param_dtype)
     raw_model = model  # keep an unwrapped reference for state_dict / save
 
     n_params = model.num_parameters()
     if main_proc:
         print(f"[model] parameters: {n_params/1e6:.1f}M "
-              f"(non-embedding {model.num_parameters(True)/1e6:.1f}M) dtype={param_dtype}", flush=True)
+              f"(non-embedding {model.num_parameters(True)/1e6:.1f}M) dtype={param_dtype} "
+              f"init_std={init_std or 'pytorch-default'}", flush=True)
         print(f"[model] config: {json.dumps(model_cfg.to_dict(), ensure_ascii=False)}", flush=True)
 
     if args.compile:

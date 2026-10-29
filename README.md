@@ -28,7 +28,9 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 
 - `dn_mode: chunk`：训练用分块并行形式，序列维并行；`fused_recurrent` 只适合逐 token 解码。
 - `dn_use_short_conv: true`、`dn_conv_size: 4`：q/k/v 上各有一个短卷积，**不要关**，论文和 fla 都指出关掉会明显掉点。
-- `dn_use_gate: false`：论文主表是无输出门的 DeltaNet。想试 gated 变体把这里改 `true` 即可（会多一个 `g_proj` + 门控 RMSNorm）。
+- `dn_use_gate: true`：**输出门**（`g_proj` + `FusedRMSNormGated`），对齐 fla 的
+  `DeltaNetForCausalLM`；关掉就是原论文 2406.06484 的纯 DeltaNet（340M 那一档）。
+  注意它和 GLA/GDN 的"衰减门"不是一回事：输出门只缩放当步输出，不改变循环状态的记忆长度。
 - `dn_qk_activation: silu`、`dn_qk_norm: l2`：q/k 先做 SiLU 再 L2 归一化。
 - `dn_allow_neg_eigval: false`：对应 negative-eigenvalue 那篇的扩展，默认关。
 
@@ -44,7 +46,8 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 | 优化器 | 隐层 2-D 矩阵用 **Muon**；embedding / lm_head / 1-D 参数用 **AdamW** |
 | 学习率 | embedding **2e-1**，hidden **2e-2**（Muon），unembedding **2e-3** |
 | 调度 | linear warmup（0.5%）+ cosine 到 10%，**衰减视界 40B**（`schedule_tokens`） |
-| 参数精度 | **bf16**（`param_dtype`，对齐上游 baseline；显存和 checkpoint 减半） |
+| 参数精度 | **fp32** 主权重 + bf16 autocast（`param_dtype`；bf16 主权重实测会让 ppl 变差，见下文） |
+| 初始化 | **normal(0, 0.02)**（`init_std`），与 fla 的 `DeltaNetForCausalLM` 一致 |
 | 权重衰减 | **分组**：Muon 2-D 矩阵 `0.1`、embedding `0.01`、lm_head `0.01`、1D/3D `0.0` |
 | 验证 | 每 1000 步在留出的 parquet 文件上算 token 加权 loss（每卡 20 个 batch） |
 
@@ -406,3 +409,37 @@ NGPU=2 OUT=... bash run_train.sh --micro-batch-size 16 --wandb-project delta-net
 
 > 没有外网又不想用 wandb：`log.jsonl` 本身就是逐行的 JSON（step/loss/lr/tokens/tok_per_s），
 > 直接 `tail -f` 或用之前的 `matplotlib` 脚本画图即可。
+## 十一、与 fla `DeltaNetForCausalLM` 的逐项对照
+
+参考实现：`fla/models/delta_net/modeling_delta_net.py` 与 `fla/layers/delta_net.py`。
+
+| 组件 | fla 参考实现 | 我们 | 状态 |
+|---|---|---|---|
+| Block | `attn_norm → attn → 残差 → mlp_norm → mlp → 残差` | 相同（pre-norm） | ✅ |
+| Mixer 参数 | `use_beta=True`, `use_short_conv`, `conv_size=4`, `qk_norm='l2'`, `qk_activation='silu'`, `norm_eps` | 逐个透传 | ✅ |
+| **输出门** | `g_proj: hidden→value_dim`；`o_norm = FusedRMSNormGated(head_v_dim)` | `dn_use_gate: true` | ✅ |
+| 输出归一化 | headwise（按 `head_v_dim` 归一）后接 `o_proj` | 同（fla 内部实现） | ✅ |
+| MLP | `DeltaNetMLP(hidden_ratio=..., SwiGLU)` | `GatedMLP(hidden_ratio=4)` | ✅ 等价 |
+| 最终 norm | `RMSNorm(hidden_size)` 后接 `lm_head` | 相同 | ✅ |
+| 位置编码 | 无 | 无 | ✅ |
+| 初始化 | `normal_(0, 0.02)`（Linear / Embedding），bias 置零 | `init_std: 0.02` | ✅ |
+| `lm_head` 绑定 | 默认 `tie_word_embeddings=True` | **untied**（和上游 baseline 一致） | ⚠️ 有意不同 |
+
+开启输出门后的参数账：
+
+```text
+374.4M  DeltaNet（q/k/v/o + b_proj + MLP）
++25.2M  g_proj（24 层 × 1024×1024）
+=399.6M  ← 和 lmtemplate 的 GDN（399.7M）基本同量级
+```
+
+Muon 组张量数会从 192 变成 **216**（每层多一个 `g_proj`），可用启动日志核对：
+
+```text
+[model] parameters: 399.6M ... dtype=torch.float32 init_std=0.02
+[opt] muon 333.7M (wd=0.1) | embed ... | head ... | other ...
+```
+
+> 注意：输出门（output gate）和 GLA/GDN 的**衰减门**（decay gate）不是一回事。
+> 前者只缩放当步输出；后者按 `exp(g_t)` 缩放循环状态。要让结构对上 GDN，
+> 还需要换成 `fla.layers.GatedDeltaNet`（当前分支未接入）。
