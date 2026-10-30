@@ -56,9 +56,9 @@ training:
   weight_decay_head: 0.01    # AdamW，lm_head
   weight_decay_other: 0.0    # AdamW，norm gain / 短卷积 kernel
 
-  # 参数本身用 bf16（上游 baseline 的做法）：显存省一半、checkpoint 从 3.1G 降到 ~1.5G。
-  # 想恢复 fp32 master weights 就改成 fp32。
-  param_dtype: fp32
+  # 参数精度：bf16 主权重（= v3 的配置），做「v3 + 输出门」的单变量对照。
+  # 已知代价：val_loss 会比 fp32 高约 0.04 nat。
+  param_dtype: bfloat16
 
   # 初始化：lmtemplate 不做自定义初始化（就是 PyTorch 默认），所以这里保持 0。
   # （fla 的 DeltaNetForCausalLM 用 normal(0, 0.02)；想对齐它就把这里改成 0.02。
