@@ -3,10 +3,9 @@
 These are the zero-shot cloze-completion tasks used in "Preconditioned DeltaNet:
 Curvature-aware Sequence Modeling for Linear Recurrences" (arXiv:2604.21100,
 Table 4), following the Based / Just Read Twice evaluation suite (Arora et al.,
-2024). The upstream lm-evaluation-harness only ships ``fda`` / ``swde`` /
-``squad_completion`` in very recent releases and does not ship the cloze
-TriviaQA / DROP tasks at all, so all five are vendored here to keep the run
-reproducible regardless of the installed harness version.
+2024). FDA/SWDE/SQuAD/DROP are vendored here for reproducibility. The current
+TQA evaluation uses lm-eval's official ``triviaqa`` task instead of
+``BasedTriviaQA``; the latter remains only as a reference implementation.
 
 Every task is ``generate_until`` with ``until=["\n"]`` and ``max_gen_toks=48``;
 the reported score is "contains" (case-insensitive substring match of the gold

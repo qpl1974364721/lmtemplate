@@ -246,6 +246,76 @@ class LanguageModel(nn.Module):
         # return ModelOutput(last_hidden_state=hidden_states, past_key_values=past_key_values)
         return hidden_states, past_key_values, total_aux_loss
 
+
+def _extract_stopping_text_config(stopping_criteria):
+    """Extract lm-eval's stop strings/tokenizer from its HF stopping criteria.
+
+    lm-eval builds a ``StoppingCriteriaList`` of ``MultiTokenEOSCriteria``.
+    Calling that criteria every generated token decodes tokens and forces a
+    GPU synchronization, so our generate loop checks them only every few
+    tokens.  The returned strings reproduce the same stop condition without
+    depending on the exact tokenization of each stop sequence.
+    """
+    if stopping_criteria is None:
+        return [], None, 0
+    try:
+        criteria = list(stopping_criteria)
+    except TypeError:
+        return [], None, 0
+
+    sequences = []
+    tokenizer = None
+    lookback = 0
+    for criterion in criteria:
+        sequence = getattr(criterion, "sequence", None)
+        criterion_tokenizer = getattr(criterion, "tokenizer", None)
+        if not isinstance(sequence, str) or not sequence or criterion_tokenizer is None:
+            return [], None, 0
+        sequences.append(sequence)
+        tokenizer = tokenizer or criterion_tokenizer
+        sequence_len = getattr(criterion, "sequence_id_len", None)
+        if not isinstance(sequence_len, int):
+            sequence_len = len(criterion_tokenizer.encode(sequence, add_special_tokens=False)) + 2
+        lookback = max(lookback, sequence_len)
+    return list(dict.fromkeys(sequences)), tokenizer, lookback
+
+
+def _generation_finished(
+    generated,
+    prompt_len,
+    generated_len,
+    eos_token_id,
+    stop_sequences,
+    stop_tokenizer,
+    stop_window,
+    stopping_criteria,
+):
+    """Check EOS and HF/lm-eval stop sequences with one host sync."""
+    if stop_sequences and stop_tokenizer is not None:
+        window_start = max(prompt_len, generated_len - stop_window)
+        suffix = generated[:, window_start:generated_len].detach().cpu()
+        decoded = stop_tokenizer.batch_decode(suffix)
+        stop_hit = all(
+            any(sequence in text for sequence in stop_sequences)
+            for text in decoded
+        )
+        last_tokens = suffix[:, -1].tolist()
+    else:
+        # Fallback for a newer/unknown criteria implementation.
+        stop_hit = (
+            bool(stopping_criteria(generated[:, :generated_len], None))
+            if stopping_criteria is not None
+            else False
+        )
+        last_tokens = generated[:, generated_len - 1].detach().cpu().tolist()
+
+    eos_hit = (
+        eos_token_id is not None
+        and all(token == eos_token_id for token in last_tokens)
+    )
+    return stop_hit or eos_hit
+
+
 class ModelForCausalLM(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -330,29 +400,43 @@ class ModelForCausalLM(nn.Module):
         top_p: float = 1.0,
         do_sample: bool = False,
         eos_token_id: int = 2,
+        stopping_criteria=None,
+        stop_check_interval: int = 8,
         **kwargs
     ):
         # batch_size=1、无 padding，mask 全 1 无用；置 None 让 fla 层跳过 mask 处理，
         # 避免 fla simple_gla 里 v.mul_ 对 conv 输出 view 做 inplace 的报错。
         attention_mask = None
 
-        # 推理阶段关闭 autograd，避免 64k 上下文下保留全部中间激活导致显存暴涨
-        with torch.no_grad():
+        stop_sequences, stop_tokenizer, stop_lookback = _extract_stopping_text_config(
+            stopping_criteria
+        )
+        stop_check_interval = max(1, int(stop_check_interval))
+        stop_window = stop_check_interval + stop_lookback
+
+        # 推理阶段关闭 autograd，避免长上下文下保留全部中间激活导致显存暴涨
+        with torch.inference_mode():
             # Determine stopping condition
             if max_new_tokens is None and max_length is None:
                 max_new_tokens = 100
 
             if max_new_tokens is not None:
+                max_new_tokens = int(max_new_tokens)
                 target_length = input_ids.shape[1] + max_new_tokens
             else:
-                target_length = max_length
+                target_length = int(max_length)
                 max_new_tokens = max_length - input_ids.shape[1]
 
             batch_size, seq_len = input_ids.shape
             device = input_ids.device
+            max_new_tokens = max(0, max_new_tokens)
+            if max_new_tokens == 0:
+                return input_ids
 
             # Prefill phase
-            position_ids = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1).to(device)
+            position_ids = torch.arange(
+                seq_len, dtype=torch.long, device=device
+            ).unsqueeze(0).expand(batch_size, -1)
             outputs = self.model(
                 input_ids=input_ids,
                 position_ids=position_ids,
@@ -367,11 +451,18 @@ class ModelForCausalLM(nn.Module):
             logits = self.lm_head(hidden_states)
             next_token_logits = logits[:, -1, :]
 
-            # Initialize generated sequence
-            generated = input_ids
+            # Preallocate the output sequence. Growing it with torch.cat on
+            # every token adds allocator/copy overhead and prevents the CPU
+            # from queuing decode work efficiently.
+            generated = input_ids.new_empty((batch_size, target_length))
+            generated[:, :seq_len].copy_(input_ids)
+            generated_len = seq_len
+            next_position_ids = torch.full(
+                (batch_size, 1), seq_len, dtype=torch.long, device=device
+            )
 
             # Decode loop
-            while past_key_values.get_sequence_length() < target_length:
+            for step in range(max_new_tokens):
                 # Apply sampling logic
                 if do_sample:
                     # Temperature
@@ -401,20 +492,33 @@ class ModelForCausalLM(nn.Module):
                     # Greedy decoding
                     next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
 
-                # Append to sequence
-                generated = torch.cat([generated, next_token], dim=-1)
+                generated[:, generated_len:generated_len + 1] = next_token
+                generated_len += 1
 
-                # Check EOS
-                if (next_token == eos_token_id).all():
+                # Decoding stop strings on every token is a host-device sync
+                # per token. Check every N tokens (and at the final token);
+                # lm-eval strips anything after the first stop string before
+                # scoring, so at most N-1 harmless extra tokens are generated.
+                check_now = (
+                    generated_len >= target_length
+                    or (step + 1) % stop_check_interval == 0
+                )
+                if check_now and _generation_finished(
+                    generated,
+                    seq_len,
+                    generated_len,
+                    eos_token_id,
+                    stop_sequences,
+                    stop_tokenizer,
+                    stop_window,
+                    stopping_criteria,
+                ):
+                    break
+                if generated_len >= target_length:
                     break
 
                 # Prepare for next iteration
                 next_token_id = next_token
-                next_position_ids = torch.tensor([past_key_values.get_sequence_length()]).unsqueeze(0).expand(batch_size, -1).to(device)
-
-                # Extend attention mask (all ones since no padding in generation)
-                if attention_mask is not None:
-                    attention_mask = torch.cat([attention_mask, torch.ones(batch_size, 1, device=device, dtype=attention_mask.dtype)], dim=-1)
 
                 # Forward pass with cached states
                 outputs = self.model(
@@ -430,5 +534,6 @@ class ModelForCausalLM(nn.Module):
                 # Get logits
                 logits = self.lm_head(hidden_states)
                 next_token_logits = logits[:, -1, :]
+                next_position_ids.add_(1)
 
-            return generated
+            return generated[:, :generated_len]

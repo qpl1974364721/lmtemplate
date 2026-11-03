@@ -211,7 +211,12 @@ python check_gka_version.py new
 
 # 2) 跑 GDN / GLA / KDA / GKA(新版) 的 TQA
 rm -rf results_tqa cache_tqa
-bash run_crir_tqa.sh                                        # → results_tqa/
+
+# 单卡：
+bash run_crir_tqa.sh
+
+# 或多卡并行不同模型（不会把单个模型拆到多卡）：
+NUM_GPUS=4 bash run_crir_tqa_multi.sh                       # → results_tqa/
 
 # 3) 复制旧版 fla（fix/mesa-cg）到工作目录再安装，避免改动 /home/csy/pkgs
 FLA_OLD_SRC=/home/csy/pkgs/flash-linear-attention
@@ -239,6 +244,29 @@ python make_crir_table.py --results-dir ./results \
 - 断点续跑：TQA 请求缓存分别在 `cache_tqa/`（新版）和 `cache_tqa_oldgka/`（旧版）；服务器重启后重跑对应脚本会续算。
 - 切换 fla 后一定要 `rm -rf` 对应的 cache 目录（缓存 key 不区分 fla 版本）。
 - `run_crir_tqa.sh` 和 `run_crir_tqa_oldgka.sh` 会在开跑前分别检查新版/旧版 gka；版本不符会立即退出，避免把同一版 GKA 跑成两行。
+- `run_crir_tqa_multi.sh` 只并行“不同模型”：每个 worker 使用一张 GPU 和 `batch-size=1`。旧版 GKA 由于要切换 FLA 环境，仍在单独阶段运行。
+
+### 生成性能修复
+
+`module/modeling.py` 的 `generate()` 现在会：
+
+- 使用 `torch.inference_mode()`；
+- 预分配输出 buffer，不再每生成一个 token 执行一次 `torch.cat`；
+- position id 直接在 GPU 上递增，不再每步从 CPU 创建并拷贝；
+- 读取 lm-eval 的停止符，并每 `8` 个 token 检查一次 EOS、换行、句号和逗号。
+
+检查间隔为 8 时最多会多生成 7 个 token，但 lm-eval 会在第一个停止符处截断，因此不改变评分文本。先做小样本性能验证：
+
+```bash
+rm -rf results_tqa_smoke cache_tqa_smoke
+/usr/bin/time -v python eval_crir.py \
+    --checkpoint checkpoints/gdn-muon/gdn-0.4b-muon-20bt-step40960.ckpt \
+    --variant gdn-muon --tokenizer ./tokenizer --tasks triviaqa \
+    --dtype bfloat16 --max-length 4096 --batch-size 1 --device cuda:0 \
+    --limit 20 --output-dir ./results_tqa_smoke --no-cache
+```
+
+确认秒/条和 GPU 利用率明显改善，再进行完整的 `17,944` 条测评。
 
 ---
 

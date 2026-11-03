@@ -28,6 +28,6 @@ flash-linear-attention>=0.4.1
 flash-attn
 
 # --- lm-eval-harness ---
-# CRIR 的 9 个 commonsense 任务用 stock lm-eval；5 个 ICR 任务已本地化在
-# ./tasks/ 下，不依赖 harness 是否自带 fda/swde/squad_completion。
+# CRIR 的 9 个 commonsense 任务和 TQA 使用 stock lm-eval；其余 4 个 ICR
+# 任务已本地化在 ./tasks/ 下。
 lm-eval>=0.4.9
