@@ -9,10 +9,12 @@ CRIR 对应论文 [Preconditioned DeltaNet](https://arxiv.org/abs/2604.21100)（
 - **Commonsense Reasoning（常识推理，9 个）**：LAMBADA、WikiText、ARC-Easy、ARC-Challenge、
   HellaSwag、PIQA、WinoGrande、BoolQ、SciQ
 - **In-context Retrieval（上下文检索，5 个）**：FDA、SWDE、SQuAD、TriviaQA（TQA）、DROP，
-  4K 上下文，cloze 补全 + "contains" 准确率
+  4K 上下文。其中 FDA/SWDE/SQuAD/DROP 是 cloze 补全 + "contains" 准确率，
+  TQA 使用 lm-eval 官方的 `triviaqa`（closed-book `rc.nocontext`，`exact_match`）。
 
-所有任务都通过 lm-eval-harness 零样本评测。5 个 ICR 任务已本地化在 `tasks/` 下（因为官方 harness
-只在新版本才带 `fda/swde/squad_completion`，并且一直没有 cloze 版 TriviaQA / DROP）。
+所有任务都通过 lm-eval-harness 零样本评测。FDA/SWDE/SQuAD/DROP 4 个 ICR 任务已本地化在 `tasks/` 下
+（因为官方 harness 只在新版本才带 `fda/swde/squad_completion`，并且一直没有 cloze 版 DROP）；
+TQA 直接用 lm-eval 自带的 `triviaqa`。
 
 - 架构：`https://github.com/Undermyth/lmtemplate`（核心已拷到本目录 `module/`）
 - 权重：服务器上 `checkpoints/` 下的 Lightning `.ckpt` 文件（不从 HuggingFace 下载）
@@ -47,7 +49,7 @@ CRIR 对应论文 [Preconditioned DeltaNet](https://arxiv.org/abs/2604.21100)（
 ```
 .
 ├── module/                 # 架构代码（modeling.py 内含 attn_impl 开关）
-├── tasks/                  # 本地化的 5 个 ICR 任务（icr_tasks.py + 5 个 yaml）
+├── tasks/                  # 本地化的 4 个 ICR 任务（FDA/SWDE/SQuAD/DROP；TQA 用 lm-eval 自带 triviaqa）
 ├── crir_bench.py           # 任务列定义 / 指标抽取 / 两组平均分（eval 与表格共用）
 ├── eval_crir.py            # 主脚本：发现 checkpoints/ 下 .ckpt 并逐个跑 CRIR
 ├── make_crir_table.py      # 汇总脚本：生成论文 Table 4 风格的表格
@@ -156,15 +158,30 @@ checkpoint 的各列分数与两组平均分。
 | ICR | FDA | `crir_fda`（本地） | `contains` |
 | ICR | SWDE | `crir_swde`（本地） | `contains` |
 | ICR | SQuAD | `crir_squad`（本地） | `contains` |
-| ICR | TriviaQA | `crir_tqa`（本地） | `contains` |
+| ICR | TriviaQA | `triviaqa`（lm-eval 官方） | `exact_match` |
 | ICR | DROP | `crir_drop`（本地） | `contains` |
 
 - **Commonsense Avg** = 8 个准确率任务的均值（ARC-E、ARC-C、HellaSwag、LAMBADA、PIQA、
   WinoGrande、BoolQ、SciQ；**不含** LAMB/Wiki 的 ppl）。
-- **ICR Avg** = 5 个 ICR `contains` 准确率的均值。
+- **ICR Avg** = 5 个 ICR 任务准确率的均值（FDA/SWDE/SQuAD/DROP 为 `contains`，TQA 为 `exact_match`）。
 
-ICR 的 5 个任务都是 zero-shot cloze 补全（`generate_until`，`until="\n"`，最多生成 48 token），
-分数是「生成串里是否包含正确答案」的 case-insensitive 子串匹配准确率，与论文一致。
+FDA/SWDE/SQuAD/DROP 是 zero-shot cloze 补全（`generate_until`，`until="\n"`，最多生成 48 token），
+分数是「生成串里是否包含正确答案」的 case-insensitive 子串匹配准确率；TQA 用 lm-eval 官方
+`triviaqa`（`mandarjoshi/trivia_qa` 的 `rc.nocontext` 闭卷问答，指标为 `exact_match`）。
+
+### 只重跑 TQA（lm-eval 官方 `triviaqa`）
+
+```bash
+bash run_crir_tqa.sh
+# 跑完合并旧结果、重算 ICR Avg：
+python make_crir_table.py --results-dir ./results \
+    --tqa-dir ./results_tqa --tqa-fp16-dir ./results_tqa_fp16
+```
+
+- `run_crir_tqa.sh` 跑 GDN/GLA/KDA/GKA(bf16) 的 TQA，以及 GKA(fp16) 的 TQA。
+- 结果分别在 `results_tqa/`（bf16）和 `results_tqa_fp16/`（gka fp16）。
+- `make_crir_table.py` 会把新 TQA 合并进 `results/` 里的旧全量结果、重算 ICR Avg，
+  输出 `results/crir_table_tqa.md` / `.csv`（GKA 会显示 bf16 和 fp16 两行）。
 
 ---
 

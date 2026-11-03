@@ -3,7 +3,9 @@
 
 Two groups:
   * Commonsense Reasoning (9 datasets)
-  * In-context Retrieval / ICR (5 datasets, cloze "contains" accuracy)
+  * In-context Retrieval / ICR (5 datasets; FDA/SWDE/SQuAD/DROP use the
+    cloze "contains" tasks, TQA uses lm-eval's official `triviaqa`
+    task with `exact_match`)
 
 Each column is ``(lm_eval_task, metric_keys, header, kind)`` where ``kind`` is
 ``"ppl"`` (lower is better, reported as-is) or ``"acc"`` (0-1, reported x100).
@@ -28,7 +30,7 @@ ICR = [
     ("crir_fda", ("contains",), "FDA (acc)", "acc"),
     ("crir_swde", ("contains",), "SWDE (acc)", "acc"),
     ("crir_squad", ("contains",), "SQuAD (acc)", "acc"),
-    ("crir_tqa", ("contains",), "TQA (acc)", "acc"),
+    ("triviaqa", ("exact_match",), "TQA (acc)", "acc"),
     ("crir_drop", ("contains",), "DROP (acc)", "acc"),
 ]
 
