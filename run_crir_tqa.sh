@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 只重跑 TQA（lm-eval 官方 triviaqa / exact_match）。
+# 只重跑 TQA（lm-eval 官方 triviaqa / exact_match）—— 新版 gka (bf16) 这一组。
 #
-# 模型: GDN, GLA, KDA, GKA
-#   全部用 --dtype bfloat16。
-#   关键: GKA 要得到「旧版 gka 局部 fp16」的效果，服务器上必须装的是
-#         Undermyth fork 的 `fix/mesa-cg` 分支（q/k 归一化强制 float16），
-#         且本仓库 module/modeling.py 里的 o_proj pre-hook 已生效（修复 chunk 路径）。
+# 模型: GDN, GLA, KDA, GKA（均 --dtype bfloat16）
+# 运行前服务器上应装的是新版 fla：Undermyth fork commit 4541223
+#   （q/k 归一化保持输入 dtype，即 gka 内核也是 bf16）。
+# 旧版 gka（fix/mesa-cg，local fp16）请用 run_crir_tqa_oldgka.sh 单独跑。
 #
-# 结果目录: ./results_tqa/（gdn/gla/kda/gka）
+# 结果目录: ./results_tqa/（gdn/gla/kda/gka-new）
 # 然后用 make_crir_table.py 把新 TQA 合并进旧的全量结果、重算 ICR Avg。
 # =============================================================================
 set -euo pipefail
@@ -30,6 +29,8 @@ CONDA_BASE="$(cd "$(dirname "$CONDA_BIN")/.." && pwd)"
 # shellcheck source=/dev/null
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate slai_eval
+
+python "$(dirname "${BASH_SOURCE[0]}")/check_gka_version.py" new
 
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/home/qpl/.cache/huggingface
@@ -61,4 +62,4 @@ done
 
 echo ""
 echo "全部完成。合并旧结果并重算 ICR Avg："
-echo "python make_crir_table.py --results-dir ./results --tqa-dir ./results_tqa"
+echo "python make_crir_table.py --results-dir ./results --tqa-dir ./results_tqa --tqa-oldgka-dir ./results_tqa_oldgka"

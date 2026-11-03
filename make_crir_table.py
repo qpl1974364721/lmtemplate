@@ -4,7 +4,7 @@
 TQA 现在使用 lm-eval 官方 `triviaqa`（exact_match）；其余 4 个 ICR 任务仍用
 本地 cloze `contains` 任务。可选地把新跑出来的 TQA 结果合并进旧的全量结果：
   --tqa-dir       bf16 的 triviaqa 结果目录（GDN/GLA/KDA/GKA）
-  --tqa-fp16-dir  gka fp16 的 triviaqa 结果目录（额外生成一行 GKA (fp16)）
+  --tqa-oldgka-dir 旧版 gka（fix/mesa-cg, local fp16）的 triviaqa 结果目录（额外生成一行）
 
 表结构（准确率 x100，ppl 原值）:
     模型 | LAMB ppl↓ | ... | Commonsense Avg |
@@ -46,7 +46,7 @@ def _merge_results(r: dict, src_dir, raw_variant: str, ckpt: str) -> dict:
     return r
 
 
-def collect(results_dir: Path, tqa_dir=None, tqa_fp16_dir=None) -> list[dict]:
+def collect(results_dir: Path, tqa_dir=None, tqa_oldgka_dir=None) -> list[dict]:
     rows = []
     for rj in sorted(results_dir.glob("*/*/results.json")):
         try:
@@ -56,23 +56,26 @@ def collect(results_dir: Path, tqa_dir=None, tqa_fp16_dir=None) -> list[dict]:
         raw_variant = rj.parent.parent.name
         ckpt = rj.parent.name
 
-        # 主行（bf16）：旧全量结果 + 新 TQA（bf16）
+        # 主行：旧全量结果 + 新版 gka 的 TQA（bf16）
         r = json.loads(json.dumps(old))
         _merge_results(r, tqa_dir, raw_variant, ckpt)
+        main_label = VARIANT_DISPLAY.get(raw_variant, raw_variant)
+        if raw_variant == "gka" and tqa_oldgka_dir is not None:
+            main_label = "GKA (new, bf16)"
         rows.append({
-            "variant": VARIANT_DISPLAY.get(raw_variant, raw_variant),
+            "variant": main_label,
             "checkpoint": ckpt,
             "scores": compute_scores(r.get("results", {}) or {}),
         })
 
-        # gka 额外一行 fp16：旧全量结果 + 新 TQA（fp16）
-        if raw_variant == "gka" and tqa_fp16_dir is not None:
-            r16 = json.loads(json.dumps(old))
-            _merge_results(r16, tqa_fp16_dir, raw_variant, ckpt)
+        # gka 额外一行：旧版 gka（fix/mesa-cg，local fp16）的 TQA
+        if raw_variant == "gka" and tqa_oldgka_dir is not None:
+            r_old = json.loads(json.dumps(old))
+            _merge_results(r_old, tqa_oldgka_dir, raw_variant, ckpt)
             rows.append({
-                "variant": "GKA (fp16)",
+                "variant": "GKA (old, local fp16)",
                 "checkpoint": ckpt,
-                "scores": compute_scores(r16.get("results", {}) or {}),
+                "scores": compute_scores(r_old.get("results", {}) or {}),
             })
     return rows
 
@@ -106,8 +109,8 @@ def main() -> None:
                     help="旧的全量 CRIR 结果目录（含 FDA/SWDE/SQuAD/DROP）")
     ap.add_argument("--tqa-dir", type=str, default=None,
                     help="新跑的 TQA（lm-eval triviaqa, bf16）结果目录")
-    ap.add_argument("--tqa-fp16-dir", type=str, default=None,
-                    help="gka fp16 的 TQA（lm-eval triviaqa）结果目录（可选）")
+    ap.add_argument("--tqa-oldgka-dir", type=str, default=None,
+                    help="旧版 gka（fix/mesa-cg，local fp16）的 TQA（lm-eval triviaqa）结果目录（可选）")
     ap.add_argument("--out-md", type=str, default="./results/crir_table_tqa.md")
     ap.add_argument("--out-csv", type=str, default="./results/crir_table_tqa.csv")
     args = ap.parse_args()
@@ -115,13 +118,15 @@ def main() -> None:
     rows = collect(
         Path(args.results_dir),
         Path(args.tqa_dir) if args.tqa_dir else None,
-        Path(args.tqa_fp16_dir) if args.tqa_fp16_dir else None,
+        Path(args.tqa_oldgka_dir) if args.tqa_oldgka_dir else None,
     )
     if not rows:
         print(f"没找到 {args.results_dir}/*/*/results.json，先跑评测。")
         return
 
-    rows.sort(key=lambda r: (r["variant"], r["checkpoint"]))
+    order = {"GDN": 0, "GLA": 1, "KDA": 2,
+             "GKA (new, bf16)": 3, "GKA (old, local fp16)": 4, "GKA": 3}
+    rows.sort(key=lambda r: (order.get(r["variant"], 99), r["checkpoint"]))
 
     md = ("# CRIR 测评结果（TQA = lm-eval 官方 triviaqa / exact_match）\n\n"
           + _md_table(rows) + "\n")

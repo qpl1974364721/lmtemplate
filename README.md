@@ -169,39 +169,76 @@ FDA/SWDE/SQuAD/DROP 是 zero-shot cloze 补全（`generate_until`，`until="\n"`
 分数是「生成串里是否包含正确答案」的 case-insensitive 子串匹配准确率；TQA 用 lm-eval 官方
 `triviaqa`（`mandarjoshi/trivia_qa` 的 `rc.nocontext` 闭卷问答，指标为 `exact_match`）。
 
-### 只重跑 TQA（lm-eval 官方 `triviaqa`，GKA 用旧版 gka 局部 fp16）
+### 只重跑 TQA（lm-eval 官方 `triviaqa`，产出 5 个结果）
 
-**GKA 的“局部 fp16”**：模型整体用 `--dtype bfloat16`，但服务器装的是 Undermyth fork 的
-`fix/mesa-cg` 分支——它的 gka 层把 q/k 归一化强制成 `float16`，所以 gka 注意力内核在
-**局部 fp16** 下计算；`module/modeling.py` 的 `o_proj` pre-hook 负责把内核的 fp16 输出
-转回 bf16，避免 chunk/prefill 路径的 dtype 报错。
+目标：`GDN / GLA / KDA / GKA(新版 bf16) / GKA(旧版 local fp16)` 共 5 个 TQA 结果。
 
-**服务器完整流程**：
+| 结果 | fla | dtype | 说明 |
+|---|---|---|---|
+| GDN / GLA / KDA / GKA(新版) | Undermyth fork commit `4541223` | bfloat16 | 全 bf16 |
+| GKA(旧版) | Undermyth fork `fix/mesa-cg` | bfloat16（gka 内核内部 fp16） | `l2_norm(..., output_dtype=torch.float16)` + `o_proj` pre-hook |
+
+**服务器完整流程（从干净结果开始）**：
 
 ```bash
-# 1) 切回旧版 fla（fix/mesa-cg）。只是 editable 安装它，不改 /home/csy/pkgs 里的文件
-pip uninstall -y flash-linear-attention
-pip install -e /home/csy/pkgs/flash-linear-attention
-python -c "import fla.layers.gka; print(fla.layers.gka.__file__)"   # 应指向 /home/csy/pkgs/...
-
-# 2) 拉最新 CRIR 代码（含 o_proj pre-hook 与 TQA 改动）
 cd /home/qpl/code/lmtemplate
+source /home/qpl/miniconda3/etc/profile.d/conda.sh
+conda activate slai_eval
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_HOME=/home/qpl/.cache/huggingface
+
+# 0) 拉最新代码（含 o_proj pre-hook 和 TQA 改动）
 git pull origin CRIR
+grep -n "cast_input_to_weight_dtype" module/modeling.py   # 确认 pre-hook 在位
+python - <<'PY'
+from crir_bench import ICR
+assert ("triviaqa", ("exact_match",), "TQA (acc)", "acc") in ICR
+print("official triviaqa/exact_match OK")
+PY
 
-# 3) 只跑 TQA（GDN/GLA/KDA/GKA，全部 --dtype bfloat16）
-bash run_crir_tqa.sh
+# 1) 安装新版 fla（commit 4541223）。不要复用旧的 fla-gka-4541223：
+#    服务器上那个浅克隆实际停在 4c62f28，并不是 4541223。
+FLA_NEW_TAG=45412236ed34d88aceadfd695a6d4ab1d614e4d7
+FLA_NEW_DIR="$PWD/flash-linear-attention-$FLA_NEW_TAG"
+if [ ! -f "$FLA_NEW_DIR/fla/layers/gka.py" ]; then
+  wget -O fla-4541223.zip \
+    "https://codeload.github.com/Undermyth/flash-linear-attention/zip/$FLA_NEW_TAG"
+  unzip -q fla-4541223.zip
+fi
+pip uninstall -y flash-linear-attention
+pip install --no-deps "$FLA_NEW_DIR"
+python check_gka_version.py new
 
-# 4) 合并旧的全量结果并重算 ICR Avg
-python make_crir_table.py --results-dir ./results --tqa-dir ./results_tqa
+# 2) 跑 GDN / GLA / KDA / GKA(新版) 的 TQA
+rm -rf results_tqa cache_tqa
+bash run_crir_tqa.sh                                        # → results_tqa/
+
+# 3) 复制旧版 fla（fix/mesa-cg）到工作目录再安装，避免改动 /home/csy/pkgs
+FLA_OLD_SRC=/home/csy/pkgs/flash-linear-attention
+FLA_OLD_DIR="$PWD/.fla-old-fix-mesa-cg"
+rm -rf "$FLA_OLD_DIR" && mkdir -p "$FLA_OLD_DIR"
+cp -a "$FLA_OLD_SRC/." "$FLA_OLD_DIR/"
+pip uninstall -y flash-linear-attention
+pip install --no-deps "$FLA_OLD_DIR"
+python check_gka_version.py old
+
+# 4) 跑 GKA(旧版 local fp16) 的 TQA
+rm -rf results_tqa_oldgka cache_tqa_oldgka
+bash run_crir_tqa_oldgka.sh                                 # → results_tqa_oldgka/
+
+# 5) 合并 5 个结果、重算 ICR Avg、出表
+python make_crir_table.py --results-dir ./results \
+    --tqa-dir ./results_tqa --tqa-oldgka-dir ./results_tqa_oldgka
 ```
 
-- `run_crir_tqa.sh` 跑 4 个模型的 TQA，全部 `--dtype bfloat16`；GKA 的“局部 fp16”来自旧版
-  fla 的 gka 层（内部 q/k 归一化强制 float16），不是 `--dtype float16`。
-- 结果在 `results_tqa/`。
-- `make_crir_table.py` 把新 TQA 合并进 `results/` 里的旧全量结果（FDA/SWDE/SQuAD/DROP），
+- `results_tqa/`：GDN / GLA / KDA / GKA(新版 bf16) 的 TQA。
+- `results_tqa_oldgka/`：GKA(旧版 local fp16) 的 TQA。
+- `make_crir_table.py` 把两个 TQA 目录分别合并进 `results/` 里的旧全量结果（FDA/SWDE/SQuAD/DROP），
   重算 `ICR Avg = mean(TQA, FDA, SWDE, SQuAD, DROP)`，输出 `results/crir_table_tqa.md` / `.csv`。
-- 以后想换回新版 gka（commit 4541223，全 bf16），重新 `pip install -e` 4541223 那份即可；
-  `o_proj` pre-hook 在新版下是 no-op，不影响。
+- 输出表格 5 行：`GDN`、`GLA`、`KDA`、`GKA (new, bf16)`、`GKA (old, local fp16)`。
+- 断点续跑：TQA 请求缓存分别在 `cache_tqa/`（新版）和 `cache_tqa_oldgka/`（旧版）；服务器重启后重跑对应脚本会续算。
+- 切换 fla 后一定要 `rm -rf` 对应的 cache 目录（缓存 key 不区分 fla 版本）。
+- `run_crir_tqa.sh` 和 `run_crir_tqa_oldgka.sh` 会在开跑前分别检查新版/旧版 gka；版本不符会立即退出，避免把同一版 GKA 跑成两行。
 
 ---
 
