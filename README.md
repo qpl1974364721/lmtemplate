@@ -107,7 +107,7 @@ ENV_NAME=ncrc_eval bash setup_env.sh
 
 ### 2. 下载四个 20BT checkpoint
 
-脚本锁定到 bucket 中准确的 20BT 文件，并校验大小和 SHA256：
+脚本锁定到 bucket 中准确的 20BT 文件，并校验大小；下载完成后会在旁边生成 `.sha256` 文件，后续重跑用该 sidecar 做内容校验：
 
 ```bash
 cd /home/qpl/code/lmtemplate
