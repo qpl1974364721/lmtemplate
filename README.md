@@ -169,19 +169,39 @@ FDA/SWDE/SQuAD/DROP 是 zero-shot cloze 补全（`generate_until`，`until="\n"`
 分数是「生成串里是否包含正确答案」的 case-insensitive 子串匹配准确率；TQA 用 lm-eval 官方
 `triviaqa`（`mandarjoshi/trivia_qa` 的 `rc.nocontext` 闭卷问答，指标为 `exact_match`）。
 
-### 只重跑 TQA（lm-eval 官方 `triviaqa`）
+### 只重跑 TQA（lm-eval 官方 `triviaqa`，GKA 用旧版 gka 局部 fp16）
+
+**GKA 的“局部 fp16”**：模型整体用 `--dtype bfloat16`，但服务器装的是 Undermyth fork 的
+`fix/mesa-cg` 分支——它的 gka 层把 q/k 归一化强制成 `float16`，所以 gka 注意力内核在
+**局部 fp16** 下计算；`module/modeling.py` 的 `o_proj` pre-hook 负责把内核的 fp16 输出
+转回 bf16，避免 chunk/prefill 路径的 dtype 报错。
+
+**服务器完整流程**：
 
 ```bash
+# 1) 切回旧版 fla（fix/mesa-cg）。只是 editable 安装它，不改 /home/csy/pkgs 里的文件
+pip uninstall -y flash-linear-attention
+pip install -e /home/csy/pkgs/flash-linear-attention
+python -c "import fla.layers.gka; print(fla.layers.gka.__file__)"   # 应指向 /home/csy/pkgs/...
+
+# 2) 拉最新 CRIR 代码（含 o_proj pre-hook 与 TQA 改动）
+cd /home/qpl/code/lmtemplate
+git pull origin CRIR
+
+# 3) 只跑 TQA（GDN/GLA/KDA/GKA，全部 --dtype bfloat16）
 bash run_crir_tqa.sh
-# 跑完合并旧结果、重算 ICR Avg：
-python make_crir_table.py --results-dir ./results \
-    --tqa-dir ./results_tqa --tqa-fp16-dir ./results_tqa_fp16
+
+# 4) 合并旧的全量结果并重算 ICR Avg
+python make_crir_table.py --results-dir ./results --tqa-dir ./results_tqa
 ```
 
-- `run_crir_tqa.sh` 跑 GDN/GLA/KDA/GKA(bf16) 的 TQA，以及 GKA(fp16) 的 TQA。
-- 结果分别在 `results_tqa/`（bf16）和 `results_tqa_fp16/`（gka fp16）。
-- `make_crir_table.py` 会把新 TQA 合并进 `results/` 里的旧全量结果、重算 ICR Avg，
-  输出 `results/crir_table_tqa.md` / `.csv`（GKA 会显示 bf16 和 fp16 两行）。
+- `run_crir_tqa.sh` 跑 4 个模型的 TQA，全部 `--dtype bfloat16`；GKA 的“局部 fp16”来自旧版
+  fla 的 gka 层（内部 q/k 归一化强制 float16），不是 `--dtype float16`。
+- 结果在 `results_tqa/`。
+- `make_crir_table.py` 把新 TQA 合并进 `results/` 里的旧全量结果（FDA/SWDE/SQuAD/DROP），
+  重算 `ICR Avg = mean(TQA, FDA, SWDE, SQuAD, DROP)`，输出 `results/crir_table_tqa.md` / `.csv`。
+- 以后想换回新版 gka（commit 4541223，全 bf16），重新 `pip install -e` 4541223 那份即可；
+  `o_proj` pre-hook 在新版下是 no-op，不影响。
 
 ---
 

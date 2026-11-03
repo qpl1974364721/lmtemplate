@@ -108,17 +108,31 @@ def _build_attention(config: "ModelConfig", layer_idx: int) -> nn.Module:
             layer_idx=layer_idx,
         )
     if impl == "gka":
-        # Gated KalmaNet lives in Undermyth's flash-linear-attention fork
-        # (commit 4541223, which fixes the float16 q/k normalization so the
-        # kernel output keeps the model dtype), not in upstream fla.
+        # Gated KalmaNet lives in Undermyth's flash-linear-attention fork, not in
+        # upstream fla.  Two fork versions are supported:
+        #   * `fix/mesa-cg` (old): q/k normalization is forced to float16, i.e.
+        #     the model is bf16 but the gka core runs in local fp16.
+        #   * commit 4541223 (new): q/k keep the model dtype (bf16 core).
+        # In the old version the chunk/prefill path can return a float16 `o`
+        # that mismatches the bf16 `o_proj`.  Cast o_proj's input to its weight
+        # dtype (no-op when they already match), without touching /home/csy/pkgs.
         from fla.layers.gka import GatedKalmaNet
-        return GatedKalmaNet(
+        gka = GatedKalmaNet(
             hidden_size=config.dim,
             head_dim=config.dim // config.n_heads,
             num_q_heads=config.n_heads,
             layer_idx=layer_idx,
             ridge_strength=0.01,
         )
+
+        def _cast_input_to_weight_dtype(module, args):
+            x = args[0]
+            if x.dtype != module.weight.dtype:
+                x = x.to(module.weight.dtype)
+            return (x,)
+
+        gka.o_proj.register_forward_pre_hook(_cast_input_to_weight_dtype)
+        return gka
     raise ValueError(f"Unknown attn_impl: {impl!r}")
 
 

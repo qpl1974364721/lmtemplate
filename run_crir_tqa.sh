@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
 # 只重跑 TQA（lm-eval 官方 triviaqa / exact_match）。
-# 模型: GDN, GLA, KDA (bf16) + GKA (bf16 和 fp16)
 #
-# 结果目录:
-#   ./results_tqa/      bf16 的 triviaqa（gdn/gla/kda/gka）
-#   ./results_tqa_fp16/ gka fp16 的 triviaqa
+# 模型: GDN, GLA, KDA, GKA
+#   全部用 --dtype bfloat16。
+#   关键: GKA 要得到「旧版 gka 局部 fp16」的效果，服务器上必须装的是
+#         Undermyth fork 的 `fix/mesa-cg` 分支（q/k 归一化强制 float16），
+#         且本仓库 module/modeling.py 里的 o_proj pre-hook 已生效（修复 chunk 路径）。
+#
+# 结果目录: ./results_tqa/（gdn/gla/kda/gka）
 # 然后用 make_crir_table.py 把新 TQA 合并进旧的全量结果、重算 ICR Avg。
 # =============================================================================
 set -euo pipefail
@@ -31,7 +34,7 @@ conda activate slai_eval
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/home/qpl/.cache/huggingface
 
-mkdir -p logs results_tqa results_tqa_fp16
+mkdir -p logs results_tqa
 
 CKPTS=(
   "checkpoints/gdn-muon/gdn-0.4b-muon-20bt-step40960.ckpt"
@@ -40,7 +43,6 @@ CKPTS=(
   "checkpoints/gka/gka-20bt-step40960.ckpt"
 )
 
-# 1) bf16: GDN / GLA / KDA / GKA
 for ckpt in "${CKPTS[@]}"; do
   variant="$(basename "$(dirname "$ckpt")")"
   echo ">>> [bf16] $variant  $ckpt"
@@ -54,22 +56,9 @@ for ckpt in "${CKPTS[@]}"; do
       --device cuda:0 \
       --output-dir ./results_tqa \
       --use-cache ./cache_tqa \
-      2>&1 | tee "logs/eval_tqa_bf16_${variant}.log"
+      2>&1 | tee "logs/eval_tqa_${variant}.log"
 done
 
-# 2) fp16: 只跑 GKA（同一个 checkpoint，不同精度；用独立缓存避免命中 bf16 缓存）
-echo ">>> [fp16] gka  checkpoints/gka/gka-20bt-step40960.ckpt"
-python eval_crir.py \
-    --checkpoint "checkpoints/gka/gka-20bt-step40960.ckpt" \
-    --variant gka \
-    --tasks triviaqa \
-    --dtype float16 \
-    --max-length 4096 \
-    --batch-size 1 \
-    --device cuda:0 \
-    --output-dir ./results_tqa_fp16 \
-    --use-cache ./cache_tqa_fp16 \
-    2>&1 | tee "logs/eval_tqa_fp16_gka.log"
-
-echo "全部完成。用下面命令合并旧结果并重算 ICR Avg："
-echo "python make_crir_table.py --results-dir ./results --tqa-dir ./results_tqa --tqa-fp16-dir ./results_tqa_fp16"
+echo ""
+echo "全部完成。合并旧结果并重算 ICR Avg："
+echo "python make_crir_table.py --results-dir ./results --tqa-dir ./results_tqa"
