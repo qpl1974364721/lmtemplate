@@ -28,6 +28,7 @@ PYTORCH_INDEX="${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/${CUDA_TAG}
 find_conda() {
   local c
   for c in "${CONDA_EXE:-}" \
+           "/data/qpl/conda/bin/conda" \
            "/home/qpl/miniconda3/bin/conda" "/home/qpl/anaconda3/bin/conda" \
            "$HOME/miniconda3/bin/conda" "$HOME/anaconda3/bin/conda" \
            "/opt/conda/bin/conda" "/opt/miniconda3/bin/conda" "/opt/anaconda3/bin/conda" \

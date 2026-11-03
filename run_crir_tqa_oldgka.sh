@@ -1,52 +1,38 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 只跑 GKA 的 TQA（lm-eval 官方 triviaqa / exact_match），使用
-# 「旧版 gka 局部 fp16」：模型 --dtype bfloat16，服务器装 fix/mesa-cg 的 fla
-# （q/k 归一化内部强制 float16），配合 module/modeling.py 的 o_proj pre-hook。
-#
-# 运行前必须先把 fla 切换到 /home/csy/pkgs/flash-linear-attention（fix/mesa-cg）。
-# 结果目录: ./results_tqa_oldgka/
+# 只跑旧版 GKA(local fp16) 的 TQA。运行前必须安装 fix/mesa-cg 版 FLA。
 # =============================================================================
 set -euo pipefail
 
-find_conda() {
-  local c
-  for c in "${CONDA_EXE:-}" \
-           "/home/qpl/miniconda3/bin/conda" "/home/qpl/anaconda3/bin/conda" \
-           "$HOME/miniconda3/bin/conda" "$HOME/anaconda3/bin/conda" \
-           "/opt/conda/bin/conda" "/opt/miniconda3/bin/conda" "/opt/anaconda3/bin/conda" \
-           "/usr/local/miniconda3/bin/conda" "/usr/local/anaconda3/bin/conda" \
-           "/home/miniconda3/bin/conda" "/home/anaconda3/bin/conda"; do
-    if [ -n "$c" ] && [ -x "$c" ]; then echo "$c"; return 0; fi
-  done
-  return 1
-}
-CONDA_BIN="$(find_conda)" || { echo "找不到 conda"; exit 1; }
-CONDA_BASE="$(cd "$(dirname "$CONDA_BIN")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 # shellcheck source=/dev/null
-source "${CONDA_BASE}/etc/profile.d/conda.sh"
-conda activate slai_eval
+source "$SCRIPT_DIR/env_ncrc.sh"
 
-python "$(dirname "${BASH_SOURCE[0]}")/check_gka_version.py" old
+python "$SCRIPT_DIR/check_gka_version.py" old
 
-export HF_ENDPOINT=https://hf-mirror.com
-export HF_HOME=/home/qpl/.cache/huggingface
+TQA_RESULTS_DIR="${RESULTS_ROOT}/tqa_oldgka"
+TQA_CACHE_DIR="${CACHE_ROOT}/tqa_oldgka"
+TQA_LOG_DIR="${LOG_ROOT}/tqa_oldgka"
+mkdir -p "$TQA_RESULTS_DIR" "$TQA_CACHE_DIR" "$TQA_LOG_DIR"
 
-mkdir -p logs results_tqa_oldgka
+CKPT="${CHECKPOINT_ROOT}/gka/gka-20bt-step40960.ckpt"
+[ -f "$CKPT" ] || { echo "缺少 checkpoint: $CKPT" >&2; exit 1; }
 
-echo ">>> [old gka, local fp16] gka  checkpoints/gka/gka-20bt-step40960.ckpt"
+echo ">>> [old gka, local fp16] $CKPT"
 python eval_crir.py \
-    --checkpoint "checkpoints/gka/gka-20bt-step40960.ckpt" \
+    --checkpoint "$CKPT" \
     --variant gka \
+    --tokenizer "$SCRIPT_DIR/tokenizer" \
     --tasks triviaqa \
     --dtype bfloat16 \
     --max-length 4096 \
     --batch-size 1 \
     --device cuda:0 \
-    --output-dir ./results_tqa_oldgka \
-    --use-cache ./cache_tqa_oldgka \
-    2>&1 | tee "logs/eval_tqa_oldgka.log"
+    --output-dir "$TQA_RESULTS_DIR" \
+    --use-cache "$TQA_CACHE_DIR" \
+    2>&1 | tee "${TQA_LOG_DIR}/eval_tqa_oldgka.log"
 
 echo ""
-echo "完成后合并 5 个结果并出表："
-echo "python make_crir_table.py --results-dir ./results --tqa-dir ./results_tqa --tqa-oldgka-dir ./results_tqa_oldgka"
+echo "生成五个 TQA 结果表："
+echo "python make_tqa_table.py --tqa-dir '${RESULTS_ROOT}/tqa_new' --tqa-oldgka-dir '$TQA_RESULTS_DIR' --out-md '${RESULTS_ROOT}/tqa_table.md' --out-csv '${RESULTS_ROOT}/tqa_table.csv'"

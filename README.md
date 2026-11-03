@@ -17,13 +17,14 @@ CRIR 对应论文 [Preconditioned DeltaNet](https://arxiv.org/abs/2604.21100)（
 TQA 直接用 lm-eval 自带的 `triviaqa`。
 
 - 架构：`https://github.com/Undermyth/lmtemplate`（核心已拷到本目录 `module/`）
-- 权重：服务器上 `checkpoints/` 下的 Lightning `.ckpt` 文件（不从 HuggingFace 下载）
+- 权重：从 Hugging Face bucket `Activator/slai` 下载到 `/data/qpl/checkpoints` 的 Lightning `.ckpt` 文件
 
 ---
 
 ## 模型与权重
 
-`checkpoints/` 下每个子目录是一个模型族，里面是不同训练 token 数（5bt ~ 38bt）的 checkpoint：
+每个模型族对应一个子目录，里面是不同训练 token 数（5bt ~ 38bt）的 checkpoint；新服务器默认使用
+`/data/qpl/checkpoints`：
 
 | 目录 | 模型 | 架构（`attn_impl`） |
 |------|------|--------------------|
@@ -51,7 +52,10 @@ TQA 直接用 lm-eval 自带的 `triviaqa`。
 ├── module/                 # 架构代码（modeling.py 内含 attn_impl 开关）
 ├── tasks/                  # 本地化的 4 个 ICR 任务（FDA/SWDE/SQuAD/DROP；TQA 用 lm-eval 自带 triviaqa）
 ├── crir_bench.py           # 任务列定义 / 指标抽取 / 两组平均分（eval 与表格共用）
-├── eval_crir.py            # 主脚本：发现 checkpoints/ 下 .ckpt 并逐个跑 CRIR
+├── eval_crir.py            # 主脚本：加载指定 .ckpt 并逐个跑 CRIR
+├── download_ncrc_checkpoints.sh  # 下载并校验四个 20BT checkpoint
+├── env_ncrc.sh             # NCRC 环境与 /data/qpl 路径
+├── make_tqa_table.py       # 生成五模型 TQA 表
 ├── make_crir_table.py      # 汇总脚本：生成论文 Table 4 风格的表格
 ├── tokenizer/              # 已下载到本地的 Llama-2 tokenizer（无需 HF 登录）
 ├── requirements.txt
@@ -67,6 +71,138 @@ TQA 直接用 lm-eval 自带的 `triviaqa`。
 `lmtemplate` 的多个分支只差 `Layer` 里 attention 这一行。这里把 `module/modeling.py` 合并成一个文件，
 用 `ModelConfig.attn_impl` 选择注意力核：`gla` / `gdn` / `kda` 对应 fla 层。另保留两处让 lm-eval 能
 正确接管的修复：`tie_weights()` no-op + `tie_word_embeddings=False`。
+
+---
+
+## NCRC 新服务器：`ncrc_eval` + `/data/qpl`
+
+当前推荐路径：
+
+```text
+代码：       /home/qpl/code/lmtemplate
+checkpoint： /data/qpl/checkpoints
+结果：       /data/qpl/results
+缓存：       /data/qpl/cache
+日志：       /data/qpl/logs
+HF 缓存：    /data/qpl/hf_cache
+conda 环境：  ncrc_eval
+```
+
+### 1. 激活环境并更新代码
+
+```bash
+cd /home/qpl/code/lmtemplate
+source /data/qpl/conda/etc/profile.d/conda.sh
+conda activate ncrc_eval
+
+python -c "import torch, transformers, datasets, lm_eval; print(torch.__version__, torch.cuda.is_available())"
+git pull origin CRIR
+```
+
+如果 `ncrc_eval` 尚未安装依赖，可先按服务器 CUDA 版本设置 `setup_env.sh` 的版本变量，再执行：
+
+```bash
+ENV_NAME=ncrc_eval bash setup_env.sh
+```
+
+### 2. 下载四个 20BT checkpoint
+
+脚本锁定到 bucket 中准确的 20BT 文件，并校验大小和 SHA256：
+
+```bash
+cd /home/qpl/code/lmtemplate
+bash download_ncrc_checkpoints.sh
+find /data/qpl/checkpoints -type f -name '*.ckpt' -printf '%s  %p\n'
+```
+
+目标文件：
+
+```text
+/data/qpl/checkpoints/gdn-muon/gdn-0.4b-muon-20bt-step40960.ckpt
+/data/qpl/checkpoints/gla/gla-0.4b-muon-20bt-step40960.ckpt
+/data/qpl/checkpoints/kda/kda-0.4b-muon-20bt-step40960.ckpt
+/data/qpl/checkpoints/gka/gka-20bt-step40960.ckpt
+```
+
+### 3. 安装新版 FLA 并跑四个新版结果
+
+```bash
+mkdir -p /data/qpl/fla
+cd /data/qpl/fla
+
+FLA_NEW_TAG=45412236ed34d88aceadfd695a6d4ab1d614e4d7
+wget -O fla-new.zip \
+  "https://codeload.github.com/Undermyth/flash-linear-attention/zip/$FLA_NEW_TAG"
+unzip -q -o fla-new.zip
+
+cd /home/qpl/code/lmtemplate
+pip uninstall -y flash-linear-attention
+pip install --no-deps "/data/qpl/fla/flash-linear-attention-$FLA_NEW_TAG"
+python check_gka_version.py new
+```
+
+先小样本确认速度和结果：
+
+```bash
+rm -rf /data/qpl/results/tqa_smoke /data/qpl/cache/tqa_smoke
+/usr/bin/time -v python eval_crir.py \
+    --checkpoint /data/qpl/checkpoints/gdn-muon/gdn-0.4b-muon-20bt-step40960.ckpt \
+    --variant gdn-muon --tokenizer ./tokenizer --tasks triviaqa \
+    --dtype bfloat16 --max-length 4096 --batch-size 1 --device cuda:0 \
+    --limit 20 --output-dir /data/qpl/results/tqa_smoke \
+    --use-cache /data/qpl/cache/tqa_smoke
+```
+
+完整运行新版四模型：
+
+```bash
+rm -rf /data/qpl/results/tqa_new /data/qpl/cache/tqa_new
+NUM_GPUS=4 bash run_crir_tqa_multi.sh
+```
+
+如果只有一张卡：
+
+```bash
+bash run_crir_tqa.sh
+```
+
+### 4. 安装旧版 FLA，跑 GKA(old, local fp16)
+
+```bash
+mkdir -p /data/qpl/fla
+cd /data/qpl/fla
+wget -O fla-old-fix-mesa-cg.zip \
+  "https://codeload.github.com/Undermyth/flash-linear-attention/zip/refs/heads/fix/mesa-cg"
+unzip -q -o fla-old-fix-mesa-cg.zip
+
+FLA_OLD_DIR="$(find /data/qpl/fla -maxdepth 1 -type d -name 'flash-linear-attention-fix-mesa-cg*' | sort | tail -1)"
+
+cd /home/qpl/code/lmtemplate
+pip uninstall -y flash-linear-attention
+pip install --no-deps "$FLA_OLD_DIR"
+python check_gka_version.py old
+
+rm -rf /data/qpl/results/tqa_oldgka /data/qpl/cache/tqa_oldgka
+bash run_crir_tqa_oldgka.sh
+```
+
+### 5. 生成五个 TQA 结果表
+
+```bash
+cd /home/qpl/code/lmtemplate
+python make_tqa_table.py \
+    --tqa-dir /data/qpl/results/tqa_new \
+    --tqa-oldgka-dir /data/qpl/results/tqa_oldgka \
+    --out-md /data/qpl/results/tqa_table.md \
+    --out-csv /data/qpl/results/tqa_table.csv
+```
+
+最终文件：
+
+```text
+/data/qpl/results/tqa_table.md
+/data/qpl/results/tqa_table.csv
+```
 
 ---
 

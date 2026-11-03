@@ -1,65 +1,55 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 只重跑 TQA（lm-eval 官方 triviaqa / exact_match）—— 新版 gka (bf16) 这一组。
+# 单卡顺序跑新版 TQA：GDN / GLA / KDA / GKA(new, bf16)。
 #
-# 模型: GDN, GLA, KDA, GKA（均 --dtype bfloat16）
-# 运行前服务器上应装的是新版 fla：Undermyth fork commit 4541223
-#   （q/k 归一化保持输入 dtype，即 gka 内核也是 bf16）。
-# 旧版 gka（fix/mesa-cg，local fp16）请用 run_crir_tqa_oldgka.sh 单独跑。
-#
-# 结果目录: ./results_tqa/（gdn/gla/kda/gka-new）
-# 然后用 make_crir_table.py 把新 TQA 合并进旧的全量结果、重算 ICR Avg。
+# 数据路径默认值：
+#   checkpoints: /data/qpl/checkpoints
+#   results:     /data/qpl/results/tqa_new
+#   cache:       /data/qpl/cache/tqa_new
+#   logs:        /data/qpl/logs/tqa_new
+# 可通过 DATA_ROOT / RESULTS_ROOT / CACHE_ROOT 等环境变量覆盖。
 # =============================================================================
 set -euo pipefail
 
-find_conda() {
-  local c
-  for c in "${CONDA_EXE:-}" \
-           "/home/qpl/miniconda3/bin/conda" "/home/qpl/anaconda3/bin/conda" \
-           "$HOME/miniconda3/bin/conda" "$HOME/anaconda3/bin/conda" \
-           "/opt/conda/bin/conda" "/opt/miniconda3/bin/conda" "/opt/anaconda3/bin/conda" \
-           "/usr/local/miniconda3/bin/conda" "/usr/local/anaconda3/bin/conda" \
-           "/home/miniconda3/bin/conda" "/home/anaconda3/bin/conda"; do
-    if [ -n "$c" ] && [ -x "$c" ]; then echo "$c"; return 0; fi
-  done
-  return 1
-}
-CONDA_BIN="$(find_conda)" || { echo "找不到 conda"; exit 1; }
-CONDA_BASE="$(cd "$(dirname "$CONDA_BIN")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 # shellcheck source=/dev/null
-source "${CONDA_BASE}/etc/profile.d/conda.sh"
-conda activate slai_eval
+source "$SCRIPT_DIR/env_ncrc.sh"
 
-python "$(dirname "${BASH_SOURCE[0]}")/check_gka_version.py" new
+python "$SCRIPT_DIR/check_gka_version.py" new
 
-export HF_ENDPOINT=https://hf-mirror.com
-export HF_HOME=/home/qpl/.cache/huggingface
-
-mkdir -p logs results_tqa
+TQA_RESULTS_DIR="${RESULTS_ROOT}/tqa_new"
+TQA_CACHE_DIR="${CACHE_ROOT}/tqa_new"
+TQA_LOG_DIR="${LOG_ROOT}/tqa_new"
+mkdir -p "$TQA_RESULTS_DIR" "$TQA_CACHE_DIR" "$TQA_LOG_DIR"
 
 CKPTS=(
-  "checkpoints/gdn-muon/gdn-0.4b-muon-20bt-step40960.ckpt"
-  "checkpoints/gla/gla-0.4b-muon-20bt-step40960.ckpt"
-  "checkpoints/kda/kda-0.4b-muon-20bt-step40960.ckpt"
-  "checkpoints/gka/gka-20bt-step40960.ckpt"
+  "${CHECKPOINT_ROOT}/gdn-muon/gdn-0.4b-muon-20bt-step40960.ckpt"
+  "${CHECKPOINT_ROOT}/gla/gla-0.4b-muon-20bt-step40960.ckpt"
+  "${CHECKPOINT_ROOT}/kda/kda-0.4b-muon-20bt-step40960.ckpt"
+  "${CHECKPOINT_ROOT}/gka/gka-20bt-step40960.ckpt"
 )
 
 for ckpt in "${CKPTS[@]}"; do
+  [ -f "$ckpt" ] || { echo "缺少 checkpoint: $ckpt" >&2; exit 1; }
   variant="$(basename "$(dirname "$ckpt")")"
   echo ">>> [bf16] $variant  $ckpt"
   python eval_crir.py \
       --checkpoint "$ckpt" \
       --variant "$variant" \
+      --tokenizer "$SCRIPT_DIR/tokenizer" \
       --tasks triviaqa \
       --dtype bfloat16 \
       --max-length 4096 \
       --batch-size 1 \
       --device cuda:0 \
-      --output-dir ./results_tqa \
-      --use-cache ./cache_tqa \
-      2>&1 | tee "logs/eval_tqa_${variant}.log"
+      --output-dir "$TQA_RESULTS_DIR" \
+      --use-cache "$TQA_CACHE_DIR" \
+      2>&1 | tee "${TQA_LOG_DIR}/eval_tqa_${variant}.log"
 done
 
 echo ""
-echo "全部完成。合并旧结果并重算 ICR Avg："
-echo "python make_crir_table.py --results-dir ./results --tqa-dir ./results_tqa --tqa-oldgka-dir ./results_tqa_oldgka"
+echo "新版四模型 TQA 完成。切到旧版 FLA 后运行："
+echo "bash run_crir_tqa_oldgka.sh"
+echo "然后生成表格："
+echo "python make_tqa_table.py --tqa-dir '$TQA_RESULTS_DIR' --tqa-oldgka-dir '${RESULTS_ROOT}/tqa_oldgka' --out-md '${RESULTS_ROOT}/tqa_table.md' --out-csv '${RESULTS_ROOT}/tqa_table.csv'"
