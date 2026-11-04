@@ -1,2 +1,12 @@
 task: based_triviaqa
 class: !function icr_tasks.BasedTriviaQA
+dataset_path: hazyresearch/based_triviaqa
+output_type: generate_until
+generation_kwargs:
+  temperature: 0.0
+  do_sample: false
+  max_gen_toks: 48
+  until:
+    - "\n"
+should_decontaminate: true
+doc_to_decontamination_query: context

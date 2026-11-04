@@ -98,9 +98,26 @@ class _QATask(ConfigurableTask):
 
     DATASET_PATH = None
     DATASET_NAME = "default"
+    SHOULD_DECONTAMINATE = False
+    GENERATION_KWARGS = {
+        "temperature": 0.0,
+        "do_sample": False,
+        "max_gen_toks": 48,
+        "until": ["\n"],
+    }
 
     def __init__(self):
-        super().__init__(config={"metadata": {"version": self.VERSION}})
+        super().__init__(config={
+            "dataset_path": self.DATASET_PATH,
+            "dataset_name": self.DATASET_NAME,
+            "output_type": "generate_until",
+            "generation_kwargs": dict(self.GENERATION_KWARGS),
+            "should_decontaminate": self.SHOULD_DECONTAMINATE,
+            "doc_to_decontamination_query": (
+                "context" if self.SHOULD_DECONTAMINATE else None
+            ),
+            "metadata": {"version": self.VERSION},
+        })
 
     def has_training_docs(self):
         return False
@@ -130,7 +147,7 @@ class _QATask(ConfigurableTask):
             Instance(
                 request_type="generate_until",
                 doc=doc,
-                arguments=(ctx, {"until": ["\n"], "max_gen_toks": 48}),
+                arguments=(ctx, dict(self.GENERATION_KWARGS)),
                 idx=0,
                 **kwargs,
             )
@@ -157,13 +174,14 @@ class BasedTriviaQA(_QATask):
     VERSION = "default"
     DATASET_PATH = "hazyresearch/based_triviaqa"
     DATASET_NAME = None
+    SHOULD_DECONTAMINATE = True
 
     @staticmethod
     def _clean_context(context):
         return re.sub(r"\[PAR\]|\[DOC\]|\[TLE\]", "", context)
 
     def should_decontaminate(self):
-        return True
+        return self.SHOULD_DECONTAMINATE
 
     def doc_to_decontamination_query(self, doc):
         return doc["context"]

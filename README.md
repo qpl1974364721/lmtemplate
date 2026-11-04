@@ -153,6 +153,16 @@ rm -rf /data/qpl/results/tqa_smoke /data/qpl/cache/tqa_smoke
     --use-cache /data/qpl/cache/tqa_smoke
 ```
 
+检查 `results.json` 中的 `configs.based_triviaqa` 必须已经记录：
+
+```text
+generation_kwargs.max_gen_toks = 48
+generation_kwargs.until = ["\n"]
+should_decontaminate = true
+```
+
+如果仍显示 `max_gen_toks=256` 或 `until=["\n\n"]`，说明代码或 task 配置没有刷新，不能开始完整测评。
+
 完整运行新版四模型：
 
 ```bash
