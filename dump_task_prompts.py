@@ -45,7 +45,12 @@ def main() -> None:
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = task.config.metadata if isinstance(task.config.metadata, dict) else {}
     stats = {
+        "task_class": f"{type(task).__module__}.{type(task).__name__}",
+        "config_source": metadata.get("config_source"),
+        "config_generation_kwargs": task.config.generation_kwargs,
+        "dataset_path": task.config.dataset_path,
         "instances": len(instances),
         "ends_with_question": 0,
         "question_occurs_more_than_once": 0,

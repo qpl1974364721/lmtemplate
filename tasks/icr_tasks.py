@@ -106,8 +106,8 @@ class _QATask(ConfigurableTask):
         "until": ["\n"],
     }
 
-    def __init__(self):
-        super().__init__(config={
+    def __init__(self, config=None):
+        base_config = {
             "dataset_path": self.DATASET_PATH,
             "dataset_name": self.DATASET_NAME,
             "output_type": "generate_until",
@@ -117,7 +117,11 @@ class _QATask(ConfigurableTask):
                 "context" if self.SHOULD_DECONTAMINATE else None
             ),
             "metadata": {"version": self.VERSION},
-        })
+        }
+        if config is not None:
+            base_config.update(config)
+        base_config.pop("class", None)
+        super().__init__(config=base_config)
 
     def has_training_docs(self):
         return False
@@ -143,11 +147,14 @@ class _QATask(ConfigurableTask):
         return context.strip().strip(".") + ". " + question
 
     def construct_requests(self, doc, ctx, chat_template=None, apply_chat_template=False, **kwargs):
+        generation_kwargs = dict(
+            self.config.generation_kwargs or self.GENERATION_KWARGS
+        )
         return [
             Instance(
                 request_type="generate_until",
                 doc=doc,
-                arguments=(ctx, dict(self.GENERATION_KWARGS)),
+                arguments=(ctx, generation_kwargs),
                 idx=0,
                 **kwargs,
             )
@@ -181,7 +188,7 @@ class BasedTriviaQA(_QATask):
         return re.sub(r"\[PAR\]|\[DOC\]|\[TLE\]", "", context)
 
     def should_decontaminate(self):
-        return self.SHOULD_DECONTAMINATE
+        return bool(self.config.should_decontaminate)
 
     def doc_to_decontamination_query(self, doc):
         return doc["context"]
