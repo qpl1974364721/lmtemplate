@@ -53,6 +53,7 @@ TQA 按论文引用复现 HazyResearch `based_triviaqa`，而不是官方闭卷 
 ├── tasks/                  # 本地化的 5 个 Based/CRIR ICR 任务（含 based_triviaqa）
 ├── crir_bench.py           # 任务列定义 / 指标抽取 / 两组平均分（eval 与表格共用）
 ├── eval_crir.py            # 主脚本：加载指定 .ckpt 并逐个跑 CRIR
+├── dump_task_prompts.py    # 导出 lm-eval 实际 prompt 并检查重复结构
 ├── download_ncrc_checkpoints.sh  # 下载并校验四个 20BT checkpoint
 ├── env_ncrc.sh             # NCRC 环境与 /data/qpl 路径
 ├── make_tqa_table.py       # 生成五模型 TQA 表
@@ -142,6 +143,18 @@ python check_gka_version.py new
 ```
 
 先小样本确认速度和结果：
+
+先导出 lm-eval 实际构造的 prompt（不加载模型）：
+
+```bash
+python dump_task_prompts.py \
+    --task based_triviaqa \
+    --out /data/qpl/results/based_triviaqa_prompts.jsonl \
+    --print-count 5
+```
+
+输出会逐条记录 `prompt`、`generation_kwargs`、question 出现次数，以及是否存在
+`internal_question_followed_by_context`。完整检查应满足 `generation_kwargs_mismatches = 0`。
 
 ```bash
 rm -rf /data/qpl/results/tqa_smoke /data/qpl/cache/tqa_smoke
