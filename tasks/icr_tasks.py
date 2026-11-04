@@ -2,10 +2,10 @@
 
 These are the zero-shot cloze-completion tasks used in "Preconditioned DeltaNet:
 Curvature-aware Sequence Modeling for Linear Recurrences" (arXiv:2604.21100,
-Table 4), following the Based / Just Read Twice evaluation suite (Arora et al.,
-2024). FDA/SWDE/SQuAD/DROP are vendored here for reproducibility. The current
-TQA evaluation uses lm-eval's official ``triviaqa`` task instead of
-``BasedTriviaQA``; the latter remains only as a reference implementation.
+Table 1), following the Based / Just Read Twice evaluation suite (Arora et al.,
+2024). FDA/SWDE/SQuAD/DROP/TQA are vendored here for reproducibility. The
+``BasedTriviaQA`` implementation mirrors the original HazyResearch task and
+reports the case-insensitive ``contains`` metric used in the paper table.
 
 Every task is ``generate_until`` with ``until=["\n"]`` and ``max_gen_toks=48``;
 the reported score is "contains" (case-insensitive substring match of the gold
@@ -147,15 +147,33 @@ class _QATask(ConfigurableTask):
 
 
 class BasedTriviaQA(_QATask):
-    VERSION = 1
+    """Original HazyResearch based_triviaqa prompt and contains scoring.
+
+    The upstream task also computes SQuAD exact/F1 and an unanswerable
+    log-likelihood. The paper's TQA column uses ``contains,none``, so those
+    unused auxiliary metrics are intentionally omitted here.
+    """
+
+    VERSION = "default"
     DATASET_PATH = "hazyresearch/based_triviaqa"
+    DATASET_NAME = None
 
     @staticmethod
     def _clean_context(context):
         return re.sub(r"\[PAR\]|\[DOC\]|\[TLE\]", "", context)
 
+    def should_decontaminate(self):
+        return True
+
+    def doc_to_decontamination_query(self, doc):
+        return doc["context"]
+
     def doc_to_text(self, doc):
-        return self._doc_to_text(doc)
+        context = self._clean_context(doc["context"].strip())
+        question = doc["question"].strip()
+        while question and context.lower().endswith(question.lower()):
+            context = context[: -len(question)]
+        return context.strip().strip(".") + ". " + question
 
 
 class BasedDrop(_QATask):

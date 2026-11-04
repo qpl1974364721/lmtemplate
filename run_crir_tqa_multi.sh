@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 多卡并行新版 TQA：GDN / GLA / KDA / GKA(new, bf16) 分配到不同 GPU。
+# 多卡并行新版 Based TriviaQA：GDN / GLA / KDA / GKA(new, bf16)。
 #
 # 单个模型内部仍为 batch-size=1；这里只并行不同模型。
 # 用法:
@@ -73,9 +73,9 @@ for ((worker=0; worker<NUM_GPUS; worker++)); do
           --checkpoint "$ckpt" \
           --variant "$variant" \
           --tokenizer "$SCRIPT_DIR/tokenizer" \
-          --tasks triviaqa \
+          --tasks based_triviaqa \
           --dtype bfloat16 \
-          --max-length 4096 \
+          --max-length 2048 \
           --batch-size 1 \
           --device cuda:0 \
           --output-dir "$TQA_RESULTS_DIR" \

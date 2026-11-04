@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 单卡顺序跑新版 TQA：GDN / GLA / KDA / GKA(new, bf16)。
+# 单卡顺序跑新版 Based TriviaQA：GDN / GLA / KDA / GKA(new, bf16)。
 #
 # 数据路径默认值：
 #   checkpoints: /data/qpl/checkpoints
@@ -38,9 +38,9 @@ for ckpt in "${CKPTS[@]}"; do
       --checkpoint "$ckpt" \
       --variant "$variant" \
       --tokenizer "$SCRIPT_DIR/tokenizer" \
-      --tasks triviaqa \
+      --tasks based_triviaqa \
       --dtype bfloat16 \
-      --max-length 4096 \
+      --max-length 2048 \
       --batch-size 1 \
       --device cuda:0 \
       --output-dir "$TQA_RESULTS_DIR" \

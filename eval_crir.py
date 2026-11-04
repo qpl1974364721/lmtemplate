@@ -8,9 +8,10 @@ Sequence Modeling for Linear Recurrences" (arXiv:2604.21100, Table 4):
     HellaSwag, PIQA, WinoGrande, BoolQ, SciQ
   * In-context Retrieval (5): FDA, SWDE, SQuAD, TriviaQA, DROP
 
-Everything is evaluated with lm-evaluation-harness in a zero-shot setting. Four
-ICR tasks are vendored under ``tasks/`` (see ``tasks/icr_tasks.py``); TQA uses
-the harness's official ``triviaqa`` task.
+Everything is evaluated with lm-evaluation-harness in a zero-shot setting. The
+five ICR tasks are vendored under ``tasks/`` (see ``tasks/icr_tasks.py``),
+including the original HazyResearch ``based_triviaqa`` task with ``contains``
+scoring.
 
 The script discovers ``*20bt*.ckpt`` checkpoints, loads each one,
 wraps the model with lm-eval's ``HFLM`` and evaluates the CRIR task list. Results

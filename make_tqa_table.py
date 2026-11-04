@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a five-row TQA table from the new/old GKA result directories."""
+"""Create a five-row Based TriviaQA table from new/old GKA result directories."""
 
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ from crir_bench import VARIANT_DISPLAY, get_metric
 
 def score_one(path: Path):
     payload = json.loads(path.read_text(encoding="utf-8"))
-    triviaqa = (payload.get("results") or {}).get("triviaqa") or {}
-    return get_metric(triviaqa, ("exact_match",))
+    task_results = payload.get("results") or {}
+    based = task_results.get("based_triviaqa") or {}
+    return get_metric(based, ("contains",))
 
 
 def collect(root: Path, suffix: str = "") -> list[dict]:
@@ -59,7 +60,7 @@ def main() -> None:
         raise SystemExit(f"Expected 5 TQA rows, got {len(rows)}: {found}")
 
     md_lines = [
-        "# TQA 结果（lm-eval official triviaqa / exact_match）",
+        "# TQA 结果（HazyResearch based_triviaqa / contains）",
         "",
         "| 模型 | Checkpoint | TQA (acc) |",
         "|---|---|---:|",
@@ -78,7 +79,7 @@ def main() -> None:
         writer = csv.writer(handle)
         writer.writerow(["variant", "checkpoint", "TQA (acc)"])
         for row in rows:
-            score = row["score"] * 100 if row["score"] is not None else ""
+            score = round(row["score"] * 100, 6) if row["score"] is not None else ""
             writer.writerow([row["variant"], row["checkpoint"], score])
 
     print("\n".join(md_lines))

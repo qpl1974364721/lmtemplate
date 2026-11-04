@@ -1,0 +1,2 @@
+task: based_triviaqa
+class: !function icr_tasks.BasedTriviaQA

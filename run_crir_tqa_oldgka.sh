@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 只跑旧版 GKA(local fp16) 的 TQA。运行前必须安装 fix/mesa-cg 版 FLA。
+# 只跑旧版 GKA(local fp16) 的 Based TriviaQA。运行前须安装 fix/mesa-cg FLA。
 # =============================================================================
 set -euo pipefail
 
@@ -24,9 +24,9 @@ python eval_crir.py \
     --checkpoint "$CKPT" \
     --variant gka \
     --tokenizer "$SCRIPT_DIR/tokenizer" \
-    --tasks triviaqa \
+    --tasks based_triviaqa \
     --dtype bfloat16 \
-    --max-length 4096 \
+    --max-length 2048 \
     --batch-size 1 \
     --device cuda:0 \
     --output-dir "$TQA_RESULTS_DIR" \

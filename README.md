@@ -9,12 +9,12 @@ CRIR 对应论文 [Preconditioned DeltaNet](https://arxiv.org/abs/2604.21100)（
 - **Commonsense Reasoning（常识推理，9 个）**：LAMBADA、WikiText、ARC-Easy、ARC-Challenge、
   HellaSwag、PIQA、WinoGrande、BoolQ、SciQ
 - **In-context Retrieval（上下文检索，5 个）**：FDA、SWDE、SQuAD、TriviaQA（TQA）、DROP，
-  4K 上下文。其中 FDA/SWDE/SQuAD/DROP 是 cloze 补全 + "contains" 准确率，
-  TQA 使用 lm-eval 官方的 `triviaqa`（closed-book `rc.nocontext`，`exact_match`）。
+  2K 上下文。五个任务均使用 Based 风格零样本生成 + `contains` 准确率；TQA 使用原始
+  HazyResearch `based_triviaqa` task（context + question）。
 
-所有任务都通过 lm-eval-harness 零样本评测。FDA/SWDE/SQuAD/DROP 4 个 ICR 任务已本地化在 `tasks/` 下
+所有任务都通过 lm-eval-harness 零样本评测。FDA/SWDE/SQuAD/TQA/DROP 5 个 ICR 任务已本地化在 `tasks/` 下
 （因为官方 harness 只在新版本才带 `fda/swde/squad_completion`，并且一直没有 cloze 版 DROP）；
-TQA 直接用 lm-eval 自带的 `triviaqa`。
+TQA 按论文引用复现 HazyResearch `based_triviaqa`，而不是官方闭卷 `rc.nocontext`。
 
 - 架构：`https://github.com/Undermyth/lmtemplate`（核心已拷到本目录 `module/`）
 - 权重：从 Hugging Face bucket `Activator/slai` 下载到 `/data/qpl/checkpoints` 的 Lightning `.ckpt` 文件
@@ -50,7 +50,7 @@ TQA 直接用 lm-eval 自带的 `triviaqa`。
 ```
 .
 ├── module/                 # 架构代码（modeling.py 内含 attn_impl 开关）
-├── tasks/                  # 本地化的 4 个 ICR 任务（FDA/SWDE/SQuAD/DROP；TQA 用 lm-eval 自带 triviaqa）
+├── tasks/                  # 本地化的 5 个 Based/CRIR ICR 任务（含 based_triviaqa）
 ├── crir_bench.py           # 任务列定义 / 指标抽取 / 两组平均分（eval 与表格共用）
 ├── eval_crir.py            # 主脚本：加载指定 .ckpt 并逐个跑 CRIR
 ├── download_ncrc_checkpoints.sh  # 下载并校验四个 20BT checkpoint
@@ -147,8 +147,8 @@ python check_gka_version.py new
 rm -rf /data/qpl/results/tqa_smoke /data/qpl/cache/tqa_smoke
 /usr/bin/time -v python eval_crir.py \
     --checkpoint /data/qpl/checkpoints/gdn-muon/gdn-0.4b-muon-20bt-step40960.ckpt \
-    --variant gdn-muon --tokenizer ./tokenizer --tasks triviaqa \
-    --dtype bfloat16 --max-length 4096 --batch-size 1 --device cuda:0 \
+    --variant gdn-muon --tokenizer ./tokenizer --tasks based_triviaqa \
+    --dtype bfloat16 --max-length 2048 --batch-size 1 --device cuda:0 \
     --limit 20 --output-dir /data/qpl/results/tqa_smoke \
     --use-cache /data/qpl/cache/tqa_smoke
 ```
@@ -294,18 +294,21 @@ checkpoint 的各列分数与两组平均分。
 | ICR | FDA | `crir_fda`（本地） | `contains` |
 | ICR | SWDE | `crir_swde`（本地） | `contains` |
 | ICR | SQuAD | `crir_squad`（本地） | `contains` |
-| ICR | TriviaQA | `triviaqa`（lm-eval 官方） | `exact_match` |
+| ICR | TriviaQA | `based_triviaqa`（HazyResearch） | `contains` |
 | ICR | DROP | `crir_drop`（本地） | `contains` |
 
 - **Commonsense Avg** = 8 个准确率任务的均值（ARC-E、ARC-C、HellaSwag、LAMBADA、PIQA、
   WinoGrande、BoolQ、SciQ；**不含** LAMB/Wiki 的 ppl）。
-- **ICR Avg** = 5 个 ICR 任务准确率的均值（FDA/SWDE/SQuAD/DROP 为 `contains`，TQA 为 `exact_match`）。
+- **ICR Avg** = 5 个 ICR 任务准确率的均值（全部为 `contains`）。
+
+两个组平均都要求对应任务全部存在；只跑 TQA 冒烟测试时，`ICR Avg` 会显示为 `None`，不会把
+TQA 单项误标成五项 ICR 平均。
 
 FDA/SWDE/SQuAD/DROP 是 zero-shot cloze 补全（`generate_until`，`until="\n"`，最多生成 48 token），
-分数是「生成串里是否包含正确答案」的 case-insensitive 子串匹配准确率；TQA 用 lm-eval 官方
-`triviaqa`（`mandarjoshi/trivia_qa` 的 `rc.nocontext` 闭卷问答，指标为 `exact_match`）。
+分数是「生成串里是否包含正确答案」的 case-insensitive 子串匹配准确率。TQA 使用 HazyResearch
+`hazyresearch/based_triviaqa` 的 context + question prompt，同样生成最多 48 token 并计算 `contains`。
 
-### 只重跑 TQA（lm-eval 官方 `triviaqa`，产出 5 个结果）
+### 只重跑 TQA（HazyResearch `based_triviaqa`，产出 5 个结果）
 
 目标：`GDN / GLA / KDA / GKA(新版 bf16) / GKA(旧版 local fp16)` 共 5 个 TQA 结果。
 
@@ -328,8 +331,8 @@ git pull origin CRIR
 grep -n "cast_input_to_weight_dtype" module/modeling.py   # 确认 pre-hook 在位
 python - <<'PY'
 from crir_bench import ICR
-assert ("triviaqa", ("exact_match",), "TQA (acc)", "acc") in ICR
-print("official triviaqa/exact_match OK")
+assert ("based_triviaqa", ("contains",), "TQA (acc)", "acc") in ICR
+print("HazyResearch based_triviaqa/contains OK")
 PY
 
 # 1) 安装新版 fla（commit 4541223）。不要复用旧的 fla-gka-4541223：
@@ -397,8 +400,8 @@ python make_crir_table.py --results-dir ./results \
 rm -rf results_tqa_smoke cache_tqa_smoke
 /usr/bin/time -v python eval_crir.py \
     --checkpoint checkpoints/gdn-muon/gdn-0.4b-muon-20bt-step40960.ckpt \
-    --variant gdn-muon --tokenizer ./tokenizer --tasks triviaqa \
-    --dtype bfloat16 --max-length 4096 --batch-size 1 --device cuda:0 \
+    --variant gdn-muon --tokenizer ./tokenizer --tasks based_triviaqa \
+    --dtype bfloat16 --max-length 2048 --batch-size 1 --device cuda:0 \
     --limit 20 --output-dir ./results_tqa_smoke --no-cache
 ```
 

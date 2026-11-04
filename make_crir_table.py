@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """把 results/*/*/results.json 汇总成 CRIR 论文风格的结果表。
 
-TQA 现在使用 lm-eval 官方 `triviaqa`（exact_match）；其余 4 个 ICR 任务仍用
-本地 cloze `contains` 任务。可选地把新跑出来的 TQA 结果合并进旧的全量结果：
-  --tqa-dir       bf16 的 triviaqa 结果目录（GDN/GLA/KDA/GKA）
-  --tqa-oldgka-dir 旧版 gka（fix/mesa-cg, local fp16）的 triviaqa 结果目录（额外生成一行）
+TQA 使用原始 HazyResearch `based_triviaqa`（contains）；它和其余 4 个 ICR 任务
+都采用 Based 风格零样本生成。可选地把新跑出来的 TQA 结果合并进旧的全量结果：
+  --tqa-dir       bf16 的 based_triviaqa 结果目录（GDN/GLA/KDA/GKA）
+  --tqa-oldgka-dir 旧版 gka（fix/mesa-cg, local fp16）的 based_triviaqa 结果目录
 
 表结构（准确率 x100，ppl 原值）:
     模型 | LAMB ppl↓ | ... | Commonsense Avg |
@@ -108,9 +108,9 @@ def main() -> None:
     ap.add_argument("--results-dir", type=str, default="./results",
                     help="旧的全量 CRIR 结果目录（含 FDA/SWDE/SQuAD/DROP）")
     ap.add_argument("--tqa-dir", type=str, default=None,
-                    help="新跑的 TQA（lm-eval triviaqa, bf16）结果目录")
+                    help="新跑的 TQA（HazyResearch based_triviaqa, bf16）结果目录")
     ap.add_argument("--tqa-oldgka-dir", type=str, default=None,
-                    help="旧版 gka（fix/mesa-cg，local fp16）的 TQA（lm-eval triviaqa）结果目录（可选）")
+                    help="旧版 gka（fix/mesa-cg，local fp16）的 based_triviaqa 结果目录（可选）")
     ap.add_argument("--out-md", type=str, default="./results/crir_table_tqa.md")
     ap.add_argument("--out-csv", type=str, default="./results/crir_table_tqa.csv")
     args = ap.parse_args()
@@ -128,7 +128,7 @@ def main() -> None:
              "GKA (new, bf16)": 3, "GKA (old, local fp16)": 4, "GKA": 3}
     rows.sort(key=lambda r: (order.get(r["variant"], 99), r["checkpoint"]))
 
-    md = ("# CRIR 测评结果（TQA = lm-eval 官方 triviaqa / exact_match）\n\n"
+    md = ("# CRIR 测评结果（TQA = HazyResearch based_triviaqa / contains）\n\n"
           + _md_table(rows) + "\n")
     print("\n" + md)
 

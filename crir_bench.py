@@ -3,9 +3,9 @@
 
 Two groups:
   * Commonsense Reasoning (9 datasets)
-  * In-context Retrieval / ICR (5 datasets; FDA/SWDE/SQuAD/DROP use the
-    cloze "contains" tasks, TQA uses lm-eval's official `triviaqa`
-    task with `exact_match`)
+  * In-context Retrieval / ICR (5 datasets; all use the Based-style
+    zero-shot generation "contains" metric, including the original
+    HazyResearch `based_triviaqa` task)
 
 Each column is ``(lm_eval_task, metric_keys, header, kind)`` where ``kind`` is
 ``"ppl"`` (lower is better, reported as-is) or ``"acc"`` (0-1, reported x100).
@@ -30,7 +30,7 @@ ICR = [
     ("crir_fda", ("contains",), "FDA (acc)", "acc"),
     ("crir_swde", ("contains",), "SWDE (acc)", "acc"),
     ("crir_squad", ("contains",), "SQuAD (acc)", "acc"),
-    ("triviaqa", ("exact_match",), "TQA (acc)", "acc"),
+    ("based_triviaqa", ("contains",), "TQA (acc)", "acc"),
     ("crir_drop", ("contains",), "DROP (acc)", "acc"),
 ]
 
@@ -65,11 +65,21 @@ def compute_scores(task_results):
     for task, metric_keys, header, _kind in ALL_COLUMNS:
         out[header] = get_metric(task_results.get(task, {}), metric_keys)
 
-    cs_acc = [out[c[2]] for c in COMMONSENSE if c[3] == "acc" and out[c[2]] is not None]
-    out["Commonsense Avg"] = (sum(cs_acc) / len(cs_acc)) if cs_acc else None
+    cs_columns = [c[2] for c in COMMONSENSE if c[3] == "acc"]
+    cs_acc = [out[header] for header in cs_columns]
+    out["Commonsense Avg"] = (
+        sum(cs_acc) / len(cs_acc)
+        if cs_acc and all(value is not None for value in cs_acc)
+        else None
+    )
 
-    icr = [out[c[2]] for c in ICR if out[c[2]] is not None]
-    out["ICR Avg"] = (sum(icr) / len(icr)) if icr else None
+    icr_columns = [c[2] for c in ICR]
+    icr = [out[header] for header in icr_columns]
+    out["ICR Avg"] = (
+        sum(icr) / len(icr)
+        if icr and all(value is not None for value in icr)
+        else None
+    )
     return out
 
 # Friendly row labels for the results table (dir name -> paper-style name).
