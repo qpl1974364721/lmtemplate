@@ -57,10 +57,11 @@ training:
   weight_decay_head: 0.01    # AdamW，lm_head
   weight_decay_other: 0.0    # AdamW，norm gain / 短卷积 kernel
 
-  # 精度：bf16 主权重（= lmtemplate 的 model.to(torch.bfloat16) + bf16-mixed autocast）。
-  # 训练更快（111k tok/s）、显存更省；代价是 val_loss 比 fp32 高约 0.02–0.04 nat。
-  # 想用 fp32 主权重 + bf16 autocast（flame/torchtitan 的官方做法）就改成 fp32。
-  param_dtype: bfloat16
+  # 混合精度（AMP）：fp32 主权重 + bf16 前向计算 + fp32 梯度/优化器状态。
+  # 与 fla 官方训练框架 flame（torchtitan）的默认一致。
+  # 注：lmtemplate 的 train.py:77 是 model.to(torch.bfloat16)（bf16-true），
+  #     参数本身就是 bf16，不等同于这里的 AMP；想复现它就改回 bfloat16。
+  param_dtype: fp32
 
   # 初始化：lmtemplate 不做自定义初始化（就是 PyTorch 默认），所以这里保持 0。
   # （fla 的 DeltaNetForCausalLM 用 normal(0, 0.02)；想对齐它就把这里改成 0.02。
