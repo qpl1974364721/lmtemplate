@@ -24,7 +24,7 @@ model:
   dn_mode: chunk            # 训练用 chunk 并行形式；fused_recurrent 只适合解码
   dn_expand_k: 1.0
   dn_expand_v: 1.0
-  dn_use_gate: true         # 输出门（g_proj + FusedRMSNormGated），对齐 fla 的 DeltaNetForCausalLM
+  dn_use_gate: false        # 输出门实测无收益（v5 vs v3: −0.17），关闭
   dn_use_short_conv: true   # q/k/v 上的短卷积，关掉会明显掉点
   dn_conv_size: 4
   dn_allow_neg_eigval: false
@@ -33,9 +33,10 @@ model:
 
 training:
   tokens: 20000000000        # 实际训练 token 数
-  # 只训 20B，但余弦衰减按 40B 走完：跑到第 19073 步（20B）就停，
-  # 此时 lr 仍是峰值的约 55%，相当于"原计划训 40B、提前一半收工"。
-  schedule_tokens: 40000000000
+  # 余弦衰减在 20B 处走完（= tokens），末端 lr = 峰值的 10%。
+  # 之前设成 40B，跑 20B 就停，末端 lr 还有 55%，等于没退火。
+  # 想和 lmtemplate baseline 严格同口径（40B 视界）就改回 40000000000。
+  schedule_tokens: 20000000000
   seq_len: 2048
   # 0.5M tokens/batch = 2^19，= 256 条 2048 序列
   global_batch_tokens: 524288
@@ -56,16 +57,17 @@ training:
   weight_decay_head: 0.01    # AdamW，lm_head
   weight_decay_other: 0.0    # AdamW，norm gain / 短卷积 kernel
 
-  # 参数精度：bf16 主权重（= v3 的配置），做「v3 + 输出门」的单变量对照。
-  # 已知代价：val_loss 会比 fp32 高约 0.04 nat。
+  # 精度：bf16 主权重（= lmtemplate 的 model.to(torch.bfloat16) + bf16-mixed autocast）。
+  # 训练更快（111k tok/s）、显存更省；代价是 val_loss 比 fp32 高约 0.02–0.04 nat。
+  # 想用 fp32 主权重 + bf16 autocast（flame/torchtitan 的官方做法）就改成 fp32。
   param_dtype: bfloat16
 
   # 初始化：lmtemplate 不做自定义初始化（就是 PyTorch 默认），所以这里保持 0。
   # （fla 的 DeltaNetForCausalLM 用 normal(0, 0.02)；想对齐它就把这里改成 0.02。
   #   两种只影响起点，不影响结构。）
   init_std: 0.0
-  # checkpoint 里权重和优化器状态存成 bf16：3.2 GiB -> ~1.6 GiB
-  # （训练本身仍是 fp32 主权重 + bf16 autocast；续跑时自动转回 fp32）
+  # checkpoint 里权重和优化器状态存成 bf16：约 1.6 GiB。
+  # 参数本来就是 bf16 时这一步是 no-op；续跑时统一转回参数 dtype。
   save_dtype: bf16
   adam_beta1: 0.9
   adam_beta2: 0.95
