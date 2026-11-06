@@ -33,10 +33,10 @@ model:
 
 training:
   tokens: 20000000000        # 实际训练 token 数
-  # 余弦衰减在 20B 处走完（= tokens），末端 lr = 峰值的 10%。
-  # 之前设成 40B，跑 20B 就停，末端 lr 还有 55%，等于没退火。
-  # 想和 lmtemplate baseline 严格同口径（40B 视界）就改回 40000000000。
-  schedule_tokens: 20000000000
+  # 余弦衰减视界 40B：跑满 20B 就停，此时 lr 约为峰值的 55%。
+  # 与 lmtemplate 的 --optimize-tokens 40 口径一致，便于和组内 baseline 对比。
+  # （代价：没有完整退火；若只追求最高分，可改成 20000000000）
+  schedule_tokens: 40000000000
   seq_len: 2048
   # 0.5M tokens/batch = 2^19，= 256 条 2048 序列
   global_batch_tokens: 524288
