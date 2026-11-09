@@ -57,6 +57,8 @@ log = logging.getLogger("crir_eval")
 VARIANT_ATTN = {
     "gdn-muon": "gdn",
     "gdn": "gdn",
+    "pgdn-0.4b": "pgdn",
+    "pgdn": "pgdn",
     "gla": "gla",
     "kda": "kda",
     "gka": "gka",
@@ -334,7 +336,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", type=str, default=None,
                    help="Run a single .ckpt file instead of auto-discovery (use with --variant).")
     p.add_argument("--variant", type=str, default=None,
-                   help="Only run this variant (dir name or attn_impl: gdn-muon/gdn/gla/kda/gka).")
+                   help="Only run this variant (dir name or attn_impl: gdn-muon/gdn/pgdn/gla/kda/gka).")
     p.add_argument("--exclude-variant", type=str, default=None,
                    help="Comma-separated variant names/dirs to skip.")
     p.add_argument("--filter", type=str, default=None,

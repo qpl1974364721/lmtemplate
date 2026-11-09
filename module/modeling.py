@@ -30,6 +30,7 @@ class ModelConfig:
     #   "attention" -> the template's FlashAttention block (module/attention.py)
     #   "gla"       -> fla.layers.simple_gla.SimpleGatedLinearAttention
     #   "gdn"       -> fla.layers.gated_deltanet.GatedDeltaNet
+    #   "pgdn"      -> fla.layers.precond_gated_deltanet.PrecondGatedDeltaNet
     #   "kda"       -> fla.layers.kda.KimiDeltaAttention
     #   "gka"       -> Gated KalmaNet (implementation not present in this repo)
     attn_impl: str = "attention"
@@ -97,6 +98,33 @@ def _build_attention(config: "ModelConfig", layer_idx: int) -> nn.Module:
             head_dim=head_dim,
             num_heads=config.n_heads,
             layer_idx=layer_idx,
+        )
+    if impl == "pgdn":
+        try:
+            from fla.layers.precond_gated_deltanet import PrecondGatedDeltaNet
+        except ImportError as exc:
+            raise ImportError(
+                "PGDN requires an FLA build containing "
+                "fla.layers.precond_gated_deltanet.PrecondGatedDeltaNet."
+            ) from exc
+        # The 20BT checkpoint contains g_proj/o_norm plus ATK-specific
+        # parameters, matching the gated short-conv PGDN layer used here.
+        return PrecondGatedDeltaNet(
+            hidden_size=config.dim,
+            expand_v=1.0,
+            head_dim=head_dim,
+            num_heads=config.n_heads,
+            mode="chunk",
+            use_gate=True,
+            use_short_conv=True,
+            allow_neg_eigval=False,
+            conv_size=4,
+            conv_bias=False,
+            layer_idx=layer_idx,
+            norm_eps=1e-6,
+            squash_x=1.5,
+            squash_eps=1e-6,
+            log_atk_scale_init=-0.2,
         )
     if impl == "kda":
         from fla.layers.kda import KimiDeltaAttention

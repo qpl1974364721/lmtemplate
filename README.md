@@ -55,8 +55,11 @@ TQA 按论文引用复现 HazyResearch `based_triviaqa`，而不是官方闭卷 
 ├── eval_crir.py            # 主脚本：加载指定 .ckpt 并逐个跑 CRIR
 ├── dump_task_prompts.py    # 导出 lm-eval 实际 prompt 并检查重复结构
 ├── download_ncrc_checkpoints.sh  # 下载并校验四个 20BT checkpoint
+├── download_pgdn_checkpoint.sh   # 下载 PGDN 0.4B-20BT checkpoint
 ├── env_ncrc.sh             # NCRC 环境与 /data/qpl 路径
 ├── make_tqa_table.py       # 生成五模型 TQA 表
+├── make_icr_table.py       # 生成 ICR 五项结果表
+├── run_crir_icr_pgdn.sh    # PGDN 全套 ICR 测评
 ├── make_crir_table.py      # 汇总脚本：生成论文 Table 4 风格的表格
 ├── tokenizer/              # 已下载到本地的 Llama-2 tokenizer（无需 HF 登录）
 ├── requirements.txt
@@ -72,6 +75,101 @@ TQA 按论文引用复现 HazyResearch `based_triviaqa`，而不是官方闭卷 
 `lmtemplate` 的多个分支只差 `Layer` 里 attention 这一行。这里把 `module/modeling.py` 合并成一个文件，
 用 `ModelConfig.attn_impl` 选择注意力核：`gla` / `gdn` / `kda` 对应 fla 层。另保留两处让 lm-eval 能
 正确接管的修复：`tie_weights()` no-op + `tie_word_embeddings=False`。
+
+---
+
+## NCRC train 服务器：PGDN 0.4B In-context Retrieval
+
+服务器约定：
+
+```text
+代码：       /home/qpl/code/lmtemplate
+大数据根目录： /data1/qpl
+checkpoint： /data1/qpl/checkpoints
+结果：       /data1/qpl/results
+缓存：       /data1/qpl/cache
+日志：       /data1/qpl/logs
+HF 缓存：    /data1/qpl/hf_cache
+conda 环境：  ncrc_train
+```
+
+### 1. 更新代码并检查环境
+
+```bash
+cd /home/qpl/code/lmtemplate
+source /data1/qpl/conda/etc/profile.d/conda.sh
+conda activate ncrc_train
+
+git pull origin CRIR
+python -c "from fla.layers.precond_gated_deltanet import PrecondGatedDeltaNet; print('PGDN FLA OK')"
+```
+
+如果上面的 import 失败，说明当前 FLA 版本不含 PGDN，需要安装训练 PGDN 时使用的 FLA。
+
+### 2. 下载 PGDN checkpoint
+
+```bash
+cd /home/qpl/code/lmtemplate
+DATA_ROOT=/data1/qpl bash download_pgdn_checkpoint.sh
+find /data1/qpl/checkpoints/pgdn-0.4b -maxdepth 1 -type f -printf '%s  %p\n'
+```
+
+目标文件：
+
+```text
+/data1/qpl/checkpoints/pgdn-0.4b/pgdn-0.4b-20bt-step40960.ckpt
+```
+
+### 3. 冒烟测试五项 ICR
+
+```bash
+export DATA_ROOT=/data1/qpl
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_HOME=/data1/qpl/hf_cache
+
+rm -rf /data1/qpl/results/icr_pgdn_smoke /data1/qpl/cache/icr_pgdn_smoke
+
+python eval_crir.py \
+    --checkpoint /data1/qpl/checkpoints/pgdn-0.4b/pgdn-0.4b-20bt-step40960.ckpt \
+    --variant pgdn-0.4b \
+    --tokenizer ./tokenizer \
+    --tasks crir_fda,crir_swde,crir_squad,based_triviaqa,crir_drop \
+    --dtype bfloat16 \
+    --max-length 2048 \
+    --batch-size 1 \
+    --device cuda:0 \
+    --limit 20 \
+    --output-dir /data1/qpl/results/icr_pgdn_smoke \
+    --no-cache
+```
+
+### 4. 完整运行五项 ICR
+
+```bash
+rm -rf /data1/qpl/results/icr_pgdn /data1/qpl/cache/icr_pgdn
+bash run_crir_icr_pgdn.sh
+```
+
+结果目录：
+
+```text
+/data1/qpl/results/icr_pgdn/pgdn-0.4b/pgdn-0.4b-20bt-step40960/results.json
+```
+
+### 5. 生成 ICR 表
+
+```bash
+python make_icr_table.py \
+    --results-dir /data1/qpl/results/icr_pgdn \
+    --out-md /data1/qpl/results/icr_table.md \
+    --out-csv /data1/qpl/results/icr_table.csv
+```
+
+输出列：
+
+```text
+FDA | SWDE | SQuAD | TQA | DROP | ICR Avg
+```
 
 ---
 

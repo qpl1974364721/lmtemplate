@@ -83,4 +83,12 @@ def compute_scores(task_results):
     return out
 
 # Friendly row labels for the results table (dir name -> paper-style name).
-VARIANT_DISPLAY = {"gdn-muon": "GDN", "gdn": "GDN", "gla": "GLA", "kda": "KDA", "gka": "GKA"}
+VARIANT_DISPLAY = {
+    "gdn-muon": "GDN",
+    "gdn": "GDN",
+    "pgdn-0.4b": "PGDN",
+    "pgdn": "PGDN",
+    "gla": "GLA",
+    "kda": "KDA",
+    "gka": "GKA",
+}

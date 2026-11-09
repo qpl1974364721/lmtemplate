@@ -16,6 +16,7 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 find_conda() {
   local c
   for c in "${CONDA_EXE:-}" \
+           "/data1/qpl/conda/bin/conda" \
            "/data/qpl/conda/bin/conda" \
            "/home/qpl/miniconda3/bin/conda" "/home/qpl/anaconda3/bin/conda" \
            "$HOME/miniconda3/bin/conda" "$HOME/anaconda3/bin/conda" \
