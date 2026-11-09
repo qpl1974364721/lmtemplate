@@ -45,8 +45,8 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 | 总步数 | 38,146（20B / 524,288） |
 | 优化器 | 隐层 2-D 矩阵用 **Muon**；embedding / lm_head / 1-D 参数用 **AdamW** |
 | 学习率 | embedding **2e-1**，hidden **2e-2**（Muon），unembedding **2e-3** |
-| 调度 | linear warmup（0.5%）+ cosine 到 10%，**衰减视界 40B**（`schedule_tokens`） |
-| 参数精度 | **fp32** 主权重 + bf16 autocast（`param_dtype`；bf16 主权重实测会让 ppl 变差，见下文） |
+| 调度 | linear warmup（0.5%）+ cosine 到 **0.1%**（`min_lr_ratio: 0.001`，对齐 lmtemplate），**衰减视界 40B**（`schedule_tokens`） |
+| 参数精度 | **bf16** 主权重（`param_dtype: bfloat16`，与 lmtemplate 的 `model.to(torch.bfloat16)` 一致）+ bf16 autocast；没有 fp32 master copy，权重更新约 8 位尾数 |
 | 初始化 | PyTorch 默认（`init_std: 0`，与 lmtemplate 一致；fla 参考实现用 0.02，可一键切换） |
 | checkpoint 存储 | **bf16**（`save_dtype: bf16`），399.6M 模型约 **1.6 GiB**（fp32 存则 3.2 GiB） |
 | 权重衰减 | **分组**：Muon 2-D 矩阵 `0.1`、embedding `0.01`、lm_head `0.01`、1D/3D `0.0` |
@@ -186,7 +186,7 @@ bash run_train.sh --schedule-tokens 60000000000  # 衰减视界改成 60B
 ```
 runs/delta_net_0.4b/
 ├── ckpt_0000500.pt      # model + muon + adamw + step + config
-├── log.jsonl            # 每 log_every 步：loss / lr / tok/s；每 eval_every 步多一行 val_loss
+├── log.jsonl            # 每 log_every 步：loss / lr / grad_norm / param_norm / tok/s；每 eval_every 步多一行 val_loss
 └── train_config.json    # 本次运行的完整参数快照
 ```
 
@@ -228,8 +228,8 @@ model.load_state_dict(ckpt["model"])
 2. **纯 DeltaNet**：论文还试了两种混合（隔层滑窗注意力、两层全局注意力）。这里
    24 层全是 DeltaNet，没有混 softmax 层，便于和仓库里 gla/gdn/kda 三个 0.4B
    baseline 直接对比。
-3. **无输出门**：`use_gate=false`，对应论文主表。
-4. **无 weight decay、无梯度裁剪**：Muon 的更新已做正交化，参考实现也不裁剪。
+3. **带输出门**：`use_gate=true`（`g_proj` + `FusedRMSNormGated`）；论文主表是纯 DeltaNet（无门）。
+4. **分组 weight decay（0.1 / 0.01 / 0.0）、无梯度裁剪**：Muon 的更新已做正交化，参考实现也不裁剪。
 5. **短卷积保留**：`use_short_conv=true`，与论文一致。
 
 ## 八、常见问题
@@ -346,8 +346,8 @@ BoolQ 56.80、SciQ 75.30；FDA 8.53、SWDE 27.09、SQuAD 28.32、TQA 31.20、DRO
 - **`--batch-size` 必须为 1**：模型是 packed-sequence 的循环结构，没有 padding mask；
 - **`--max-length` 默认 4096**，和 CRIR 分支 / 论文一致；ICR 的 SWDE/FDA 文档很长，
   用 2048 会截掉上下文、分数明显偏低；
-- **`--add-bos` 默认关**：训练数据是 packed 序列、没有 BOS；CRIR 分支默认加 BOS，
-  想严格对齐那边的口径可以传 `--add-bos`；
+- **`--add-bos` 默认开**：训练数据每篇文档前都加了 BOS（Llama-2 约定），评测跟着加，
+  保持训练/评测一致；要复现早期无 BOS 的结果用 `--no-add-bos`；
 - 模型会被转成 **bf16**（fla 的 chunk 内核只支持 bf16）；
 - 上下文检索那 5 个任务是 `generate_until`（`tasks/` 下本地化），需要模型实现 `generate`；
   这里用的是**无 KV cache 的贪心解码**（每步重跑前缀、只取最后位置的 logits），
@@ -396,7 +396,7 @@ NGPU=2 OUT=... bash run_train.sh --micro-batch-size 16 --wandb-project delta-net
 另外 `wandb.init(config=...)` 会把完整训练配置（含 `model_config`、world size、accum）记下来，
 在网页的 Config 面板里能直接看到。
 
-> 没有外网又不想用 wandb：`log.jsonl` 本身就是逐行的 JSON（step/loss/lr/tokens/tok_per_s），
+> 没有外网又不想用 wandb：`log.jsonl` 本身就是逐行的 JSON（step/loss/lr/grad_norm/param_norm/tokens/tok_per_s），
 > 直接 `tail -f` 或用之前的 `matplotlib` 脚本画图即可。
 ## 十一、与 fla `DeltaNetForCausalLM` 的逐项对照
 
@@ -425,7 +425,7 @@ NGPU=2 OUT=... bash run_train.sh --micro-batch-size 16 --wandb-project delta-net
 Muon 组张量数会从 192 变成 **216**（每层多一个 `g_proj`），可用启动日志核对：
 
 ```text
-[model] parameters: 399.6M ... dtype=torch.float32 init_std=pytorch-default
+[model] parameters: 399.6M ... dtype=torch.bfloat16 init_std=pytorch-default
 [opt] muon 333.7M (wd=0.1) | embed ... | head ... | other ...
 ```
 

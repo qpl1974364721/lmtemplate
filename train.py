@@ -92,11 +92,11 @@ DEFAULTS = dict(
     weight_decay_embed=0.01,
     weight_decay_head=0.01,
     weight_decay_other=0.0,
-    # 参数精度：fp32 是默认（v3 用 bf16 主权重后 ppl 明显变差，回滚）
-    param_dtype="fp32",
+    # 参数精度：bf16 主权重，和 lmtemplate 的 model.to(torch.bfloat16) 一致
+    param_dtype="bfloat16",
     # 初始化标准差：lmtemplate 用 PyTorch 默认（0）；fla 参考实现用 0.02
     init_std=0.0,
-    # checkpoint 存储精度：bf16 把 3.2 GiB 压到 ~1.6 GiB（训练仍是 fp32 混合精度）
+    # checkpoint 存储精度：bf16 把 3.2 GiB 压到 ~1.6 GiB（与训练精度解耦）
     save_dtype="bf16",
     adam_beta1=0.9,
     adam_beta2=0.95,
@@ -114,7 +114,7 @@ DEFAULTS = dict(
     val_files=20,                  # 最后 N 个 parquet 文件留作验证集
     val_tokens=10_000_000,
     batch_docs=256,                # 每次编码多少篇文档
-    eos_id=2,
+    bos_id=1,                      # 每篇文档前加 BOS（Llama-2），对齐 lmtemplate
 )
 
 
@@ -311,6 +311,25 @@ def evaluate(model, val, micro: int, seq_len: int, n_batches: int,
     return float(total / count.clamp(min=1.0))
 
 
+@torch.no_grad()
+def grad_and_param_norms(model) -> tuple[float, float]:
+    """L2 norms of the gradients and of the weights (fp32 accumulation).
+
+    Same diagnostics lmtemplate logs as ``train/grad_norm`` / ``train/param_norm``:
+    called after the last backward of an accumulation window and before
+    ``optimizer.step()``.  Everything is summed on-device and read back once, so
+    the cost is a single pass over weights + grads (a few ms) per log interval.
+    """
+    device = next(model.parameters()).device
+    g2 = torch.zeros((), device=device, dtype=torch.float32)
+    p2 = torch.zeros((), device=device, dtype=torch.float32)
+    for p in model.parameters():
+        p2 += p.detach().float().pow(2).sum()
+        if p.grad is not None:
+            g2 += p.grad.detach().float().pow(2).sum()
+    return float(g2.sqrt().item()), float(p2.sqrt().item())
+
+
 # ---------------------------------------------------------------------------
 # optimizers
 # ---------------------------------------------------------------------------
@@ -351,10 +370,11 @@ def build_optimizers(model: ModelForCausalLM, cfg: dict):
              weight_decay=cfg["weight_decay_other"]),
     ]
     # weight decay is now per group (see muon.yaml upstream: 0.1 / 0.01 / 0.01 / 0.0)
+    # eps follows lmtemplate's MuonWithAuxAdam (1e-10) instead of torch's 1e-8.
     adamw = torch.optim.AdamW(
         adam_groups,
         betas=(cfg["adam_beta1"], cfg["adam_beta2"]),
-        eps=1e-8,
+        eps=1e-10,
         fused=torch.cuda.is_available(),
     )
 
@@ -416,9 +436,9 @@ def _cast_tensors(obj, dtype):
 def save_checkpoint(path, step, raw_model, muon, adamw, model_cfg, cfg,
                     stream_states=None, tokenizer_sig=None):
     # ``save_dtype: bf16`` stores weights *and* optimizer state in bf16, which
-    # halves the file (3.2 GiB -> ~1.6 GiB).  Training itself stays fp32 (mixed
-    # precision); a resume casts everything back to fp32 on load, so the only
-    # cost is bf16 rounding of the momentum buffers.
+    # halves the file (3.2 GiB -> ~1.6 GiB).  Training dtype is independent of
+    # the storage dtype (see ``param_dtype``); a resume casts everything back to
+    # the model dtype, so the only cost is bf16 rounding of the momentum buffers.
     save_dtype = resolve_dtype(cfg.get("save_dtype") or "fp32")
     cast = None if save_dtype == torch.float32 else save_dtype
 
@@ -600,7 +620,7 @@ def main(argv=None):
             my_files,
             tokenizer,
             seq_len=seq_len,
-            eos_id=cfg["eos_id"],
+            bos_id=cfg["bos_id"],
             batch_docs=cfg["batch_docs"],
         )
         if main_proc:
@@ -610,7 +630,7 @@ def main(argv=None):
 
         if val_files and cfg["val_tokens"] > 0:
             val = build_val_tokens(val_files, tokenizer, cfg["val_tokens"],
-                                   eos_id=cfg["eos_id"], log=print if main_proc else (lambda *a, **k: None))
+                                   bos_id=cfg["bos_id"], log=print if main_proc else (lambda *a, **k: None))
         else:
             if main_proc:
                 print("[data] val_files=0 -> validation disabled", flush=True)
@@ -628,10 +648,10 @@ def main(argv=None):
             print(f"[resume] loading {ckpt_path}", flush=True)
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         # checkpoints may be stored in bf16 (save_dtype) -- cast back to the
-        # model's dtype so training continues in fp32 exactly as before
-        raw_model.load_state_dict(_cast_tensors(ckpt["model"], torch.float32))
-        muon.load_state_dict(_cast_tensors(ckpt["muon"], torch.float32))
-        adamw.load_state_dict(_cast_tensors(ckpt["adamw"], torch.float32))
+        # model dtype so training continues in the same precision as before
+        raw_model.load_state_dict(_cast_tensors(ckpt["model"], param_dtype))
+        muon.load_state_dict(_cast_tensors(ckpt["muon"], param_dtype))
+        adamw.load_state_dict(_cast_tensors(ckpt["adamw"], param_dtype))
         start_step = int(ckpt["step"])
 
         if stream is not None:
@@ -736,6 +756,15 @@ def main(argv=None):
             (loss / accum).backward()
             step_loss += loss.detach().float().item() / accum
 
+        # Diagnostics before the update, mirroring lmtemplate's train/grad_norm
+        # and train/param_norm.  Only computed on steps that will be logged.
+        will_log = main_proc and (
+            (step + 1) % cfg["log_every"] == 0 or step + 1 == total_steps
+        )
+        grad_norm = param_norm = None
+        if will_log:
+            grad_norm, param_norm = grad_and_param_norms(raw_model)
+
         muon.step()
         adamw.step()
 
@@ -751,16 +780,20 @@ def main(argv=None):
             eta_h = remaining / tok_s / 3600 if tok_s > 0 else float("inf")
             lr_now = muon.param_groups[0]["lr"]
             msg = (f"[step {completed_step}/{total_steps}] loss {step_loss:.4f} | lr {lr_now:.4e} | "
+                   f"gnorm {grad_norm:.3f} | pnorm {param_norm:.2f} | "
                    f"{tok_s/1e3:.0f}k tok/s | {tokens_done/1e9:.2f}B | "
                    f"elapsed {elapsed/3600:.2f}h | eta {eta_h:.2f}h")
             print(msg, flush=True)
             log_file.write(json.dumps(dict(step=completed_step, loss=step_loss, lr=lr_now,
+                                           grad_norm=grad_norm, param_norm=param_norm,
                                            tokens=tokens_done, tok_per_s=tok_s,
                                            elapsed_s=elapsed), ensure_ascii=False) + "\n")
             log_file.flush()
             if wandb_run is not None:
                 try:
                     wandb_run.log({"train/loss": step_loss, "train/lr": lr_now,
+                                   "train/grad_norm": grad_norm,
+                                   "train/param_norm": param_norm,
                                    "train/tok_per_s": tok_s,
                                    "train/tokens_B": tokens_done / 1e9,
                                    "train/elapsed_h": elapsed / 3600},

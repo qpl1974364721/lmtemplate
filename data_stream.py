@@ -13,6 +13,9 @@
 断点续跑：流的位置（第几个文件、文件内第几篇文档、打包缓冲里剩的 token）会写进
 checkpoint。重启时按位置重新打开文件、跳过已读文档（只解码 parquet，不重新
 tokenize），然后从缓冲继续，所以不会重复消耗算力。
+
+文档分隔沿用 Llama-2 的约定：**每篇文档前加一个 BOS（id 1），不追加 EOS**；
+等价于 lmtemplate 里的 ``tokenizer(texts, add_special_tokens=True)``。
 """
 
 from __future__ import annotations
@@ -77,10 +80,14 @@ def build_val_tokens(
     val_files: Sequence[str],
     tokenizer,
     target_tokens: int,
-    eos_id: int = 2,
+    bos_id: int = 1,
     log=print,
 ) -> np.ndarray:
-    """Tokenise a fixed slice of held-out documents into a uint16 array."""
+    """Tokenise a fixed slice of held-out documents into a uint16 array.
+
+    Documents are separated exactly like the training stream: one BOS prepended
+    to each document (Llama-2 convention), no EOS appended.
+    """
     import pyarrow.parquet as pq
 
     buf: List[int] = []
@@ -93,8 +100,8 @@ def build_val_tokens(
             for row in tokenizer(
                 texts, add_special_tokens=False, return_attention_mask=False
             )["input_ids"]:
+                buf.append(bos_id)
                 buf.extend(row)
-                buf.append(eos_id)
             if len(buf) >= target_tokens:
                 out = np.asarray(buf[:target_tokens], dtype=np.uint16)
                 log(f"[data] val: {len(out)} tokens from {len(val_files)} held-out files")
@@ -116,13 +123,13 @@ class PackedStream:
         files: Sequence[str],
         tokenizer,
         seq_len: int,
-        eos_id: int = 2,
+        bos_id: int = 1,
         batch_docs: int = 256,
     ):
         self.files = list(files)
         self.tokenizer = tokenizer
         self.seq_len = int(seq_len)
-        self.eos_id = int(eos_id)
+        self.bos_id = int(bos_id)
         self.batch_docs = int(batch_docs)
 
         self.pending: List[int] = []   # tokens not yet turned into a sequence
@@ -202,8 +209,8 @@ class PackedStream:
                 texts, add_special_tokens=False, return_attention_mask=False
             )["input_ids"]
             for row in encoded:
+                self.pending.append(self.bos_id)
                 self.pending.extend(row)
-                self.pending.append(self.eos_id)
         out = np.asarray(self.pending[:n], dtype=np.int64)
         del self.pending[:n]
         self.tokens_total += n

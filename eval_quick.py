@@ -113,8 +113,10 @@ def main(argv=None) -> int:
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--tokenizer", default="./tokenizer")
     p.add_argument("--output-dir", default="./eval_results")
-    p.add_argument("--add-bos", action="store_true",
-                   help="给上下文加 BOS；CRIR 分支默认开，我们训练没用 BOS，默认关")
+    p.add_argument("--add-bos", dest="add_bos", action="store_true", default=True,
+                   help="给上下文加 BOS。训练数据每篇文档前都有 BOS，默认开；"
+                        "想复现旧的无 BOS 口径用 --no-add-bos")
+    p.add_argument("--no-add-bos", dest="add_bos", action="store_false")
     p.add_argument("--no-cache", action="store_true")
     args = p.parse_args(argv)
 
