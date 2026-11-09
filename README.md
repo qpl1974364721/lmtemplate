@@ -111,6 +111,9 @@ DATA_ROOT=/data1/qpl bash install_pgdn_fla.sh
 python -c "from fla.layers.precond_gated_deltanet import PrecondGatedDeltaNet; print('PGDN FLA OK')"
 ```
 
+脚本会在安装前清除 conda `site-packages/fla/` 中旧版 FLA 的残留目录。旧版 FLA 0.5.2 的
+`fla/utils/` 目录与 PGDN 版的 `fla/utils.py` 冲突，必须完整清理，不能只执行 `pip uninstall`。
+
 ### 2. 下载 PGDN checkpoint
 
 ```bash

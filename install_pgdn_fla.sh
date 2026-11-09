@@ -23,7 +23,30 @@ fi
   exit 1
 }
 
-python -m pip uninstall -y flash-linear-attention
+SITE_PACKAGES="$(python - <<'PY'
+import site
+print(site.getsitepackages()[0])
+PY
+)"
+FLA_PACKAGE="${SITE_PACKAGES}/fla"
+SITE_PACKAGES_REAL="$(realpath -m "$SITE_PACKAGES")"
+FLA_PACKAGE_REAL="$(realpath -m "$FLA_PACKAGE")"
+
+case "$FLA_PACKAGE_REAL" in
+  "$SITE_PACKAGES_REAL"/*) ;;
+  *)
+    echo "Refusing to remove unexpected FLA path: $FLA_PACKAGE_REAL" >&2
+    exit 1
+    ;;
+esac
+
+python -m pip uninstall -y flash-linear-attention || true
+
+# FLA 0.5.2 used fla/utils/ while the bundled PGDN FLA uses fla/utils.py.
+# pip uninstall can leave the old directory behind, causing a circular import
+# through the stale fla/utils/_decorators.py. Remove the old package fully.
+rm -rf "$FLA_PACKAGE_REAL"
+
 python -m pip install --no-deps "$FLA_SRC"
 
 python - <<'PY'
