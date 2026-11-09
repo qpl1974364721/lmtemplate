@@ -77,14 +77,18 @@ DeltaNet 层的细节（`ModelConfig` 里可改）：
 ├── muon.py                # Muon 优化器（Newton-Schulz 正交化）
 ├── data_stream.py         # 在线 tokenize：流式读 parquet + 打包 + 断点位置
 ├── train.py               # DDP 训练主脚本（断点续跑、验证、日志、ckpt）
-├── prepare_data.py        # （可选）离线预 tokenize 成 train.bin，训练不再依赖
 ├── configs/
 │   └── delta_net_0.4b.yaml
 ├── tokenizer/             # Llama-2 tokenizer（4 个文件）
 ├── requirements.txt
 ├── setup_env.sh           # 建 conda 环境 ncrc_train
-├── run_train.sh           # 单机多卡直接跑
+├── run_train.sh           # 单机多卡直接跑（自动适配 sm_120 的 NCCL）
 ├── run_train.slurm        # Slurm 作业（--requeue）
+│
+├── eval_quick.py          # 评测入口：常识 9 项 + ICR 5 项
+├── crir_bench.py          # 论文 Table 的列定义与分组平均
+├── tasks/                 # 本地化的 5 个 ICR 任务（yaml + icr_tasks.py）
+├── setup_eval_env.sh      # 从 ncrc_train 克隆出独立的 ncrc_eval
 └── README.md
 ```
 
@@ -103,19 +107,6 @@ torch 2.4 只带 triton 3.0，`import fla` 会直接报
 `setup_env.sh` 默认已经改成 `torch==2.9.1 + cu130`，换 CUDA 版本用
 `PYTORCH_CUDA=12.8 bash setup_env.sh`。
 
-**如果这台机器只做数据预处理**（不训练、无 GPU），不用装 torch/fla，
-用轻量依赖就够（约 1.5 GB 而不是 6 GB）：
-
-```bash
-conda create -y -n slai_prep python=3.11
-conda activate slai_prep
-pip install -r requirements-prep.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-python prepare_data.py --source ... --out ...
-```
-
-`requirements-prep.txt` 只有 `datasets / transformers / numpy / huggingface_hub`。
-预处理产物（`train.bin`）是纯二进制，**与 torch 版本、CUDA 版本、GPU 型号都无关**，
-在哪台机器上生成都一样，可以直接拷到训练集群。
 
 ### 2. 数据（在线 tokenize，不需要预处理）
 
@@ -141,9 +132,6 @@ data:
 **验证集怎么来的**：最后 `val_files` 个 parquet 文件不参与训练，启动时把它们
 里的一段（`val_tokens`）编码进内存（约 20 MB）作为验证集。因为是**按文件**留出
 的，同一篇文档不会既在训练集又在验证集。验证时用固定种子的窗口，跨 step 可比。
-
-> `prepare_data.py` 仍然保留，如果你以后想离线预 tokenize 也能用，但训练已经
-> 不依赖它了。
 
 ### 3. 冒烟测试
 

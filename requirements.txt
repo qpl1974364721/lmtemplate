@@ -21,10 +21,9 @@ pyyaml
 flash-linear-attention>=0.5.2
 
 # --- 数据 ---
-# 训练时在线 tokenize：data_stream.py 直接用 pyarrow 读 parquet
-# （datasets 只在可选的 prepare_data.py / HF 下载路径里用到）
+# 训练时在线 tokenize：data_stream.py 直接用 pyarrow 读 parquet。
+# huggingface_hub 只在首次下载 tokenizer/dataset 时用到。
 pyarrow
-datasets>=2.20
 huggingface_hub
 
 # --- 评测（可选，只有 eval_quick.py 需要，训练不需要）---

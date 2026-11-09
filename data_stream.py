@@ -1,7 +1,7 @@
 """On-the-fly text streaming + tokenisation + packing.
 
 训练时直接从 parquet 流式读文本、用**当前配置的 tokenizer** 现 tokenize、打包成
-定长序列。相比"先 prepare_data.py 全量 tokenize 成 bin"，好处是：
+定长序列。相比"预先全量 tokenize 成 bin"，好处是：
 
   * 换 tokenizer 只要改配置、重启，不需要重新处理整个语料；
   * 不占 40 GB 磁盘，也不用等 10 分钟的预处理；
