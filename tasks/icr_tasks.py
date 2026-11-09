@@ -35,9 +35,27 @@ class _CompletionTask(ConfigurableTask):
 
     DATASET_PATH = None
     DATASET_NAME = "default"
+    GENERATION_KWARGS = {
+        "temperature": 0.0,
+        "do_sample": False,
+        "max_gen_toks": 48,
+        "until": ["\n"],
+    }
 
-    def __init__(self):
-        super().__init__(config={"metadata": {"version": self.VERSION}})
+    def __init__(self, config=None):
+        base_config = {
+            "dataset_path": self.DATASET_PATH,
+            "dataset_name": self.DATASET_NAME,
+            "output_type": "generate_until",
+            "generation_kwargs": dict(self.GENERATION_KWARGS),
+            "should_decontaminate": False,
+            "doc_to_decontamination_query": None,
+            "metadata": {"version": self.VERSION},
+        }
+        if config is not None:
+            base_config.update(config)
+        base_config.pop("class", None)
+        super().__init__(config=base_config)
 
     def has_training_docs(self):
         return False
@@ -58,11 +76,14 @@ class _CompletionTask(ConfigurableTask):
         return doc["value"].strip()
 
     def construct_requests(self, doc, ctx, chat_template=None, apply_chat_template=False, **kwargs):
+        generation_kwargs = dict(
+            self.config.generation_kwargs or self.GENERATION_KWARGS
+        )
         return [
             Instance(
                 request_type="generate_until",
                 doc=doc,
-                arguments=(ctx, {"until": ["\n"], "max_gen_toks": 48}),
+                arguments=(ctx, generation_kwargs),
                 idx=0,
                 **kwargs,
             )

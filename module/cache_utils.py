@@ -21,20 +21,21 @@ class Cache:
     def update(
         self, 
         recurrent_state: Optional[Float[torch.Tensor, 'b h d D']] = None,    # for recurrent models 
+        A_state: Optional[Float[torch.Tensor, 'b h d D']] = None,            # PGDN preconditioner state
         key_state: Optional[Float[torch.Tensor, 'b h t d']] = None,          # for transformer models
         value_state: Optional[Float[torch.Tensor, 'b h t d']] = None,
         conv_state = None,                                                   # common state
         layer_idx: int = -1,
         offset: int = 0,
     ):
-        if recurrent_state is not None:
-            if len(self) <= layer_idx:
-                self.cache.append({
-                    'recurrent_state': recurrent_state,
-                })
-            else:
+        if recurrent_state is not None or A_state is not None:
+            while len(self) <= layer_idx:
+                self.cache.append({})
+            if recurrent_state is not None:
                 self.cache[layer_idx]['recurrent_state'] = recurrent_state
-        
+            if A_state is not None:
+                self.cache[layer_idx]['A_state'] = A_state
+
         elif key_state is not None:
             assert value_state is not None
             if len(self) <= layer_idx:
@@ -51,6 +52,8 @@ class Cache:
                 self.cache[layer_idx]['value_cache'] = value_cache
 
         if conv_state is not None:
+            while len(self) <= layer_idx:
+                self.cache.append({})
             self.cache[layer_idx]['conv_state'] = conv_state
 
         if layer_idx == 0:
