@@ -104,7 +104,12 @@ git pull origin CRIR
 python -c "from fla.layers.precond_gated_deltanet import PrecondGatedDeltaNet; print('PGDN FLA OK')"
 ```
 
-如果上面的 import 失败，说明当前 FLA 版本不含 PGDN，需要安装训练 PGDN 时使用的 FLA。
+如果上面的 import 失败，安装 PGDN 训练仓库中锁定 commit 的 FLA：
+
+```bash
+DATA_ROOT=/data1/qpl bash install_pgdn_fla.sh
+python -c "from fla.layers.precond_gated_deltanet import PrecondGatedDeltaNet; print('PGDN FLA OK')"
+```
 
 ### 2. 下载 PGDN checkpoint
 
