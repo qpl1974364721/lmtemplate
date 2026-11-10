@@ -7,6 +7,7 @@ cd "$SCRIPT_DIR"
 
 export DATA_ROOT="${DATA_ROOT:-/data1/qpl}"
 export ENV_NAME="${ENV_NAME:-ncrc_train}"
+export ENV_PREFIX="${ENV_PREFIX:-/data1/qpl/conda/envs/ncrc_train}"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/env_ncrc.sh"
 

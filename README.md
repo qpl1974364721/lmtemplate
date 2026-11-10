@@ -93,6 +93,17 @@ HF 缓存：    /data1/qpl/hf_cache
 conda 环境：  ncrc_train
 ```
 
+建议先把训练环境克隆到大数据盘，避免占用 `/home/qpl`：
+
+```bash
+cd /home/qpl/code/lmtemplate
+bash clone_ncrc_env_to_data1.sh
+
+conda activate /data1/qpl/conda/envs/ncrc_train_eval
+```
+
+默认克隆目标为 `/data1/qpl/conda/envs/ncrc_train_eval`，原 `ncrc_train` 不会被删除。验证新环境可用后再决定是否清理旧环境。
+
 ### 1. 更新代码并检查环境
 
 ```bash
@@ -119,6 +130,16 @@ python -c "from fla.layers.precond_gated_deltanet import PrecondGatedDeltaNet; p
 ```bash
 bash install_pgdn_eval_deps.sh
 ```
+
+如果要使用 **FLA 0.6.0** 重新测评 PGDN：
+
+```bash
+git pull origin CRIR
+bash install_pgdn_fla_060.sh
+```
+
+0.6.0 使用独立的 `fla-core==0.6.0`，脚本会清理旧 FLA 后同时安装
+`fla-core==0.6.0` 和 `flash-linear-attention==0.6.0`。
 
 ### 2. 下载 PGDN checkpoint
 

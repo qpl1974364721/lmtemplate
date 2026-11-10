@@ -7,6 +7,7 @@ RESULTS_ROOT="${RESULTS_ROOT:-${DATA_ROOT}/results}"
 CACHE_ROOT="${CACHE_ROOT:-${DATA_ROOT}/cache}"
 LOG_ROOT="${LOG_ROOT:-${DATA_ROOT}/logs}"
 ENV_NAME="${ENV_NAME:-ncrc_eval}"
+ENV_PREFIX="${ENV_PREFIX:-}"
 
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export HF_HOME="${HF_HOME:-${DATA_ROOT}/hf_cache}"
@@ -36,10 +37,18 @@ CONDA_BASE="$(cd "$(dirname "${CONDA_BIN}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
 
-if ! conda env list | awk '{print $1}' | grep -qx "${ENV_NAME}"; then
-  echo "找不到 conda 环境 ${ENV_NAME}。请先检查 conda env list。" >&2
-  return 1
+if [ -n "$ENV_PREFIX" ]; then
+  if [ ! -x "${ENV_PREFIX}/bin/python" ]; then
+    echo "找不到 conda 前缀环境: ${ENV_PREFIX}" >&2
+    return 1
+  fi
+  conda activate "${ENV_PREFIX}"
+else
+  if ! conda env list | awk '{print $1}' | grep -qx "${ENV_NAME}"; then
+    echo "找不到 conda 环境 ${ENV_NAME}。请先检查 conda env list。" >&2
+    return 1
+  fi
+  conda activate "${ENV_NAME}"
 fi
-conda activate "${ENV_NAME}"
 
-export DATA_ROOT CHECKPOINT_ROOT RESULTS_ROOT CACHE_ROOT LOG_ROOT ENV_NAME
+export DATA_ROOT CHECKPOINT_ROOT RESULTS_ROOT CACHE_ROOT LOG_ROOT ENV_NAME ENV_PREFIX
