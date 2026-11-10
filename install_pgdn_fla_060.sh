@@ -33,12 +33,13 @@ python -m pip install \
 python - <<'PY'
 import inspect
 import fla
-import fla_core
+from importlib.metadata import version
 from fla.layers.precond_gated_deltanet import PrecondGatedDeltaNet
 
 print("fla:", fla.__file__)
-print("fla version:", fla.__version__)
-print("fla_core:", fla_core.__file__)
+print("fla version:", getattr(fla, "__version__", "unknown"))
+print("fla-core distribution:", version("fla-core"))
+print("flash-linear-attention distribution:", version("flash-linear-attention"))
 print("PGDN:", PrecondGatedDeltaNet.__module__)
 print("PGDN signature:", inspect.signature(PrecondGatedDeltaNet.__init__))
 PY

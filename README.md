@@ -141,6 +141,9 @@ bash install_pgdn_fla_060.sh
 0.6.0 使用独立的 `fla-core==0.6.0`，脚本会清理旧 FLA 后同时安装
 `fla-core==0.6.0` 和 `flash-linear-attention==0.6.0`。
 
+验证时使用 `importlib.metadata.version("fla-core")` 查询分发版本；代码导入路径仍是
+`fla`，不要写 `import fla_core`。
+
 ### 2. 下载 PGDN checkpoint
 
 ```bash
